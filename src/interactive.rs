@@ -7,8 +7,8 @@ use crate::{RunOutcome, Shell};
 use crossterm::event::{KeyCode, KeyModifiers};
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    ColumnarMenu, DefaultHinter, EditCommand, Emacs, FileBackedHistory, MenuBuilder, Reedline,
-    ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+    ColumnarMenu, DefaultHinter, EditCommand, Emacs, FileBackedHistory, MenuBuilder,
+    MouseClickMode, Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use std::fs;
 use std::io::Write;
@@ -59,6 +59,7 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
 
     let mut editor = Reedline::create()
         .use_bracketed_paste(true)
+        .with_mouse_click(MouseClickMode::EnabledWithOsc133)
         .with_history(history)
         .with_hinter(Box::new(
             DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
