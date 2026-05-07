@@ -29,3 +29,21 @@ pub fn repair_terminal() {
     );
     let _ = out.flush();
 }
+
+pub fn set_prompt_cursor() {
+    if !io::stdout().is_terminal() {
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b[5 q");
+    let _ = out.flush();
+}
+
+pub fn reset_cursor_shape() {
+    if !io::stdout().is_terminal() {
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b[0 q");
+    let _ = out.flush();
+}

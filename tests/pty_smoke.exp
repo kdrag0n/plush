@@ -15,6 +15,7 @@ expect_before -re "\033\\\[6n" {
     exp_continue
 }
 
+expect "\033\[5 q"
 expect "❯ "
 send "git ch\t"
 expect "checkout"
@@ -23,6 +24,7 @@ expect "^C"
 expect "❯ "
 
 send "sleep 0.1 &\r"
+expect "\033\[0 q"
 expect "started"
 expect "❯ "
 send "jobs\r"

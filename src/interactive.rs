@@ -81,6 +81,7 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
         prompt.refresh(last_outcome.as_ref());
         println!();
         let _ = std::io::stdout().flush();
+        crate::terminal::set_prompt_cursor();
         match editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 if line.trim().is_empty() {
@@ -88,6 +89,7 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
                     continue;
                 }
                 let _ = crossterm::terminal::disable_raw_mode();
+                crate::terminal::reset_cursor_shape();
                 match shell.run_line(&line) {
                     Ok(outcome) => last_outcome = Some(outcome),
                     Err(err) => {
@@ -109,6 +111,7 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
                 });
             }
             Ok(Signal::CtrlD) => {
+                crate::terminal::reset_cursor_shape();
                 println!("exit");
                 return Ok(shell.env.last_status());
             }
