@@ -86,6 +86,16 @@ fn tracks_background_jobs_in_command_mode() {
 }
 
 #[test]
+fn reports_command_not_found_like_a_shell() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "plush-definitely-missing-command"])
+        .assert()
+        .failure()
+        .stderr("plush: command not found: plush-definitely-missing-command\n");
+}
+
+#[test]
 fn exposes_completion_inspection_cli() {
     Command::cargo_bin("plush")
         .unwrap()

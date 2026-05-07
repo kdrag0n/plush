@@ -96,12 +96,7 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
         apply_redirects(&mut process, cmd, shell)?;
         configure_child_process_group(&mut process, pgid);
 
-        let mut child = process.spawn().map_err(|err| {
-            PlushError::msg(format!(
-                "{}: {err}",
-                argv.first().map_or("", String::as_str)
-            ))
-        })?;
+        let mut child = process.spawn().map_err(|err| spawn_error(&argv[0], err))?;
         let child_pid = Pid::from_raw(child.id() as i32);
         if pgid.is_none() {
             pgid = Some(child_pid);
@@ -352,6 +347,14 @@ fn resolve_program(name: &str, shell: &Shell) -> PathBuf {
         }
     }
     PathBuf::from(name)
+}
+
+fn spawn_error(command: &str, err: io::Error) -> PlushError {
+    if err.kind() == io::ErrorKind::NotFound {
+        PlushError::msg(format!("command not found: {command}"))
+    } else {
+        PlushError::msg(format!("{command}: {err}"))
+    }
 }
 
 fn fg_job(shell: &mut Shell, spec: Option<&str>) -> Result<i32> {

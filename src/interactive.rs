@@ -39,6 +39,15 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
         KeyCode::Char('f'),
         ReedlineEvent::Edit(vec![EditCommand::Complete]),
     );
+    keybindings.add_binding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char('c'),
+        ReedlineEvent::Multiple(vec![
+            ReedlineEvent::Esc,
+            ReedlineEvent::Repaint,
+            ReedlineEvent::CtrlC,
+        ]),
+    );
 
     let completion_menu = Box::new(
         ColumnarMenu::default()

@@ -16,6 +16,12 @@ expect_before -re "\033\\\[6n" {
 }
 
 expect "❯ "
+send "git ch\t"
+expect "checkout"
+send "\x03"
+expect "^C"
+expect "❯ "
+
 send "sleep 0.1 &\r"
 expect "started"
 expect "❯ "

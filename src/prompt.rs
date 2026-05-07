@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+const PURE_GIT_BRANCH: Color = Color::Fixed(242);
+const PURE_GIT_DIRTY: Color = Color::Fixed(218);
+const PURE_MUTED: Color = Color::Fixed(242);
+
 #[derive(Debug, Clone)]
 pub struct PromptState {
     cwd: PathBuf,
@@ -18,6 +22,7 @@ pub struct PromptState {
     git_slow: bool,
     venv: Option<String>,
     ssh: bool,
+    user_host: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,8 +47,8 @@ impl Default for PromptState {
                 .ok()
                 .or_else(|| std::env::var("CONDA_DEFAULT_ENV").ok())
                 .map(short_env_name),
-            ssh: std::env::var_os("SSH_CONNECTION").is_some()
-                || std::env::var_os("SSH_CLIENT").is_some(),
+            ssh: is_ssh(),
+            user_host: None,
         }
     }
 }
@@ -63,8 +68,8 @@ impl PromptState {
             .ok()
             .or_else(|| std::env::var("CONDA_DEFAULT_ENV").ok())
             .map(short_env_name);
-        self.ssh = std::env::var_os("SSH_CONNECTION").is_some()
-            || std::env::var_os("SSH_CLIENT").is_some();
+        self.ssh = is_ssh();
+        self.user_host = self.ssh.then(user_host).flatten();
         self.refresh_git(outcome.is_some());
     }
 
@@ -114,16 +119,12 @@ impl Default for PurePrompt {
 impl Prompt for PurePrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
         let mut left = String::new();
+        left.push('\n');
         if self.state.ssh {
-            left.push_str(&Style::new().fg(Color::Purple).paint("ssh ").to_string());
-        }
-        if let Some(venv) = &self.state.venv {
-            left.push_str(
-                &Style::new()
-                    .fg(Color::Cyan)
-                    .paint(format!("({venv}) "))
-                    .to_string(),
-            );
+            if let Some(user_host) = &self.state.user_host {
+                left.push_str(&Style::new().fg(PURE_MUTED).paint(user_host).to_string());
+                left.push(' ');
+            }
         }
         left.push_str(
             &Style::new()
@@ -135,25 +136,29 @@ impl Prompt for PurePrompt {
             left.push(' ');
             left.push_str(
                 &Style::new()
-                    .fg(Color::Purple)
+                    .fg(PURE_GIT_BRANCH)
                     .paint(&git.branch)
                     .to_string(),
             );
             if git.dirty {
-                left.push_str(&Style::new().fg(Color::Yellow).paint(" *").to_string());
-            }
-            if git.ahead {
-                left.push_str(&Style::new().fg(Color::Green).paint(" up").to_string());
+                left.push_str(&Style::new().fg(PURE_GIT_DIRTY).paint("*").to_string());
             }
             if git.behind {
-                left.push_str(&Style::new().fg(Color::Red).paint(" down").to_string());
+                left.push(' ');
+                left.push_str(&Style::new().fg(Color::Cyan).paint("⇣").to_string());
+            }
+            if git.ahead {
+                if !git.behind {
+                    left.push(' ');
+                }
+                left.push_str(&Style::new().fg(Color::Cyan).paint("⇡").to_string());
             }
         }
         if let Some(duration) = self.state.duration {
             left.push(' ');
             left.push_str(
                 &Style::new()
-                    .fg(Color::LightGray)
+                    .fg(Color::Yellow)
                     .paint(format_duration(duration))
                     .to_string(),
             );
@@ -167,16 +172,22 @@ impl Prompt for PurePrompt {
     }
 
     fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> Cow<'_, str> {
+        let mut prompt = String::new();
+        if let Some(venv) = &self.state.venv {
+            prompt.push_str(&Style::new().fg(PURE_MUTED).paint(venv).to_string());
+            prompt.push(' ');
+        }
         let style = if self.state.status == 0 {
-            Style::new().fg(Color::Cyan)
+            Style::new().fg(Color::Magenta)
         } else {
             Style::new().fg(Color::Red)
         };
-        Cow::Owned(format!("{} ", style.paint("❯")))
+        prompt.push_str(&format!("{} ", style.paint("❯")));
+        Cow::Owned(prompt)
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
-        Cow::Owned(Style::new().fg(Color::LightGray).paint("  ").to_string())
+        Cow::Owned(Style::new().fg(PURE_MUTED).paint("… ").to_string())
     }
 
     fn render_prompt_history_search_indicator(
@@ -196,7 +207,7 @@ impl Prompt for PurePrompt {
 
     fn get_indicator_color(&self) -> CrosstermColor {
         if self.state.status == 0 {
-            CrosstermColor::Cyan
+            CrosstermColor::Magenta
         } else {
             CrosstermColor::Red
         }
@@ -268,6 +279,21 @@ fn output_trimmed(command: &mut Command) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
+fn user_host() -> Option<String> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok()?;
+    let host = std::env::var("HOST")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| output_trimmed(Command::new("hostname").arg("-s")))?;
+    Some(format!("{user}@{host}"))
+}
+
+fn is_ssh() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_CLIENT").is_some()
+}
+
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     if secs >= 60 {
@@ -282,4 +308,46 @@ fn short_env_name(value: String) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_matches_pure_spacing_and_colors() {
+        let mut prompt = PurePrompt::new();
+        prompt.state.git = Some(GitInfo {
+            branch: "main".to_string(),
+            dirty: true,
+            ahead: true,
+            behind: true,
+        });
+        prompt.state.duration = Some(Duration::from_secs(6));
+
+        let left = prompt.render_prompt_left();
+        assert!(left.starts_with('\n'));
+        assert!(left.ends_with('\n'));
+        assert!(left.contains("\x1b[38;5;242mmain\x1b[0m"));
+        assert!(left.contains("\x1b[38;5;218m*\x1b[0m"));
+        assert!(left.contains("\x1b[36m⇣\x1b[0m\x1b[36m⇡\x1b[0m"));
+        assert!(left.contains("\x1b[33m6s\x1b[0m"));
+    }
+
+    #[test]
+    fn prompt_indicator_uses_pure_prompt_line() {
+        let mut prompt = PurePrompt::new();
+        prompt.state.venv = Some("venv".to_string());
+        prompt.state.status = 0;
+        assert_eq!(
+            prompt.render_prompt_indicator(PromptEditMode::Default),
+            "\x1b[38;5;242mvenv\x1b[0m \x1b[35m❯\x1b[0m "
+        );
+
+        prompt.state.status = 1;
+        assert_eq!(
+            prompt.render_prompt_indicator(PromptEditMode::Default),
+            "\x1b[38;5;242mvenv\x1b[0m \x1b[31m❯\x1b[0m "
+        );
+    }
 }
