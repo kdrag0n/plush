@@ -110,9 +110,26 @@ fn parse_line_col(raw: &str) -> Option<(usize, usize)> {
 }
 
 fn parse_for_exec(input: &str) -> Result<Script> {
+    if is_likely_compound(input) {
+        return Err(PlushError::Unsupported(
+            "compound command runs through bash compatibility path".to_string(),
+        ));
+    }
     let tokens = tokenize(input)?;
     let mut p = ExecParser { tokens, pos: 0 };
     p.script()
+}
+
+fn is_likely_compound(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    let first = trimmed
+        .split(|c: char| c.is_ascii_whitespace() || matches!(c, ';' | '(' | '{'))
+        .next()
+        .unwrap_or("");
+    matches!(
+        first,
+        "if" | "for" | "while" | "until" | "case" | "select" | "function" | "[[" | "(("
+    ) || trimmed.contains("()")
 }
 
 struct ExecParser {

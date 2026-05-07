@@ -38,6 +38,18 @@ pub fn run_script(shell: &mut Shell, script: &Script) -> Result<i32> {
     Ok(last)
 }
 
+pub fn run_bash_compat(shell: &Shell, line: &str) -> Result<i32> {
+    let mut process = ProcessCommand::new("/bin/bash");
+    process.arg("-c").arg(line);
+    process.env_clear();
+    for (k, v) in shell.env.iter() {
+        process.env(k, v);
+    }
+    let status = process.status()?;
+    crate::terminal::repair_terminal();
+    Ok(exit_code(status))
+}
+
 fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
     if pipeline.commands.len() == 1 && !pipeline.background {
         if let Some(status) = try_builtin(shell, &pipeline.commands[0])? {

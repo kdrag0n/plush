@@ -46,3 +46,13 @@ fn validates_bash_compound_syntax() {
         .assert()
         .success();
 }
+
+#[test]
+fn runs_valid_bash_compound_syntax_through_compat_path() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "if true; then echo ok; fi"])
+        .assert()
+        .success()
+        .stdout("ok\n");
+}

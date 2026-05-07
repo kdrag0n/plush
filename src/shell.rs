@@ -41,8 +41,16 @@ impl Shell {
     pub fn run_line(&mut self, line: &str) -> Result<RunOutcome> {
         let start = std::time::Instant::now();
         let expanded_alias = self.expand_alias(line)?;
-        let script = parser::parse(&expanded_alias)?;
-        let status = exec::run_script(self, &script)?;
+        let status = match parser::parse(&expanded_alias) {
+            Ok(script) => exec::run_script(self, &script)?,
+            Err(err) => {
+                if parser::validate_with_brush(&expanded_alias).is_ok() {
+                    exec::run_bash_compat(self, &expanded_alias)?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         self.env.set_last_status(status);
         self.reap_background_jobs();
         Ok(RunOutcome {
