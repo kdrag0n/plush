@@ -72,3 +72,13 @@ fn loads_local_autoenv_on_cd_without_executing_it() {
         .success()
         .stdout("meow\n");
 }
+
+#[test]
+fn tracks_background_jobs_in_command_mode() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "sleep 0.2 & jobs"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("running sleep 0.2"));
+}

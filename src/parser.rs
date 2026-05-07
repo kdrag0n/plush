@@ -167,6 +167,13 @@ impl ExecParser {
                     self.pos += 1;
                     Connector::Always
                 }
+                Some(Token::Amp) => {
+                    self.pos += 1;
+                    if let Some(last) = items.last_mut() {
+                        last.pipeline.background = true;
+                    }
+                    Connector::Always
+                }
                 None => Connector::Always,
                 other => {
                     return Err(PlushError::Syntax(format!(
@@ -185,12 +192,7 @@ impl ExecParser {
             self.pos += 1;
             commands.push(self.command()?);
         }
-        let background = if matches!(self.peek(), Some(Token::Amp)) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        };
+        let background = false;
         Ok(Pipeline {
             commands,
             background,
@@ -508,6 +510,14 @@ mod tests {
         assert_eq!(script.items[0].pipeline.commands.len(), 2);
         assert_eq!(script.items[1].connector, Connector::And);
         assert_eq!(script.items[2].connector, Connector::Or);
+    }
+
+    #[test]
+    fn ampersand_separates_background_jobs() {
+        let script = parse_for_exec("sleep 1 & jobs").unwrap();
+        assert_eq!(script.items.len(), 2);
+        assert!(script.items[0].pipeline.background);
+        assert_eq!(script.items[1].pipeline.commands[0].words[0], "jobs");
     }
 
     #[test]
