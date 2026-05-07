@@ -51,6 +51,11 @@ impl Completer for PlushCompleter {
             file_suggestions(start, prefix, false)
         };
         if self.bridge_enabled && should_use_shell_bridge(&suggestions, command_position, prefix) {
+            if !command_position {
+                suggestions.extend(programmable_bash_completion_bridge(
+                    line, pos, start, prefix,
+                ));
+            }
             suggestions.extend(shell_completion_bridge(start, prefix, command_position));
         }
         dedup(suggestions)
@@ -322,6 +327,68 @@ fn shell_completion_bridge(start: usize, prefix: &str, command_position: bool) -
         .collect::<Vec<_>>();
     out.extend(zsh_completion_bridge(start, prefix, command_position));
     out
+}
+
+fn programmable_bash_completion_bridge(
+    line: &str,
+    pos: usize,
+    start: usize,
+    prefix: &str,
+) -> Vec<Suggestion> {
+    if prefix.len() > 128 || line.len() > 4096 {
+        return Vec::new();
+    }
+    let script = r#"
+source /opt/homebrew/etc/profile.d/bash_completion.sh >/dev/null 2>&1 || \
+source /usr/local/etc/profile.d/bash_completion.sh >/dev/null 2>&1 || \
+source /usr/share/bash-completion/bash_completion >/dev/null 2>&1 || true
+COMP_LINE=$PLUSH_COMP_LINE
+COMP_POINT=$PLUSH_COMP_POINT
+prefix=${COMP_LINE:0:COMP_POINT}
+read -r -a COMP_WORDS <<< "$prefix"
+COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+if (( COMP_CWORD < 0 )); then exit 0; fi
+cmd=${COMP_WORDS[0]}
+cur=${COMP_WORDS[$COMP_CWORD]}
+if (( COMP_CWORD > 0 )); then prev=${COMP_WORDS[$((COMP_CWORD - 1))]}; else prev=; fi
+type _completion_loader >/dev/null 2>&1 && _completion_loader "$cmd" >/dev/null 2>&1 || true
+spec=$(complete -p "$cmd" 2>/dev/null) || exit 0
+func=
+words=($spec)
+for ((i=0; i<${#words[@]}; i++)); do
+  if [[ ${words[$i]} == -F && $((i + 1)) -lt ${#words[@]} ]]; then
+    func=${words[$((i + 1))]}
+  fi
+done
+[[ -n $func ]] || exit 0
+COMPREPLY=()
+"$func" "$cmd" "$cur" "$prev" >/dev/null 2>&1 || true
+printf '%s\n' "${COMPREPLY[@]}"
+"#;
+    let Ok(output) = Command::new("bash")
+        .arg("-lc")
+        .arg(script)
+        .env("PLUSH_COMP_LINE", line)
+        .env("PLUSH_COMP_POINT", pos.to_string())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|value| value.starts_with(prefix))
+        .take(100)
+        .map(|value| Suggestion {
+            span: Span::new(start, start + prefix.len()),
+            value: value.to_string(),
+            description: Some("bash completion".to_string()),
+            append_whitespace: true,
+            ..Suggestion::default()
+        })
+        .collect()
 }
 
 fn zsh_completion_bridge(start: usize, prefix: &str, command_position: bool) -> Vec<Suggestion> {
