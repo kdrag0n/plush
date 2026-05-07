@@ -5,7 +5,7 @@ use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchS
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct PromptState {
@@ -13,6 +13,9 @@ pub struct PromptState {
     status: i32,
     duration: Option<Duration>,
     git: Option<GitInfo>,
+    git_cache_cwd: Option<PathBuf>,
+    git_last_refresh: Option<Instant>,
+    git_slow: bool,
     venv: Option<String>,
     ssh: bool,
 }
@@ -32,6 +35,9 @@ impl Default for PromptState {
             status: 0,
             duration: None,
             git: None,
+            git_cache_cwd: None,
+            git_last_refresh: None,
+            git_slow: false,
             venv: std::env::var("VIRTUAL_ENV")
                 .ok()
                 .or_else(|| std::env::var("CONDA_DEFAULT_ENV").ok())
@@ -59,7 +65,27 @@ impl PromptState {
             .map(short_env_name);
         self.ssh = std::env::var_os("SSH_CONNECTION").is_some()
             || std::env::var_os("SSH_CLIENT").is_some();
+        self.refresh_git(outcome.is_some());
+    }
+
+    fn refresh_git(&mut self, command_finished: bool) {
+        let cwd_changed = self.git_cache_cwd.as_ref() != Some(&self.cwd);
+        let stale = self
+            .git_last_refresh
+            .is_none_or(|last| last.elapsed() > Duration::from_secs(10));
+
+        if !cwd_changed && !command_finished && !stale {
+            return;
+        }
+        if self.git_slow && !cwd_changed && !command_finished && !stale {
+            return;
+        }
+
+        let start = Instant::now();
         self.git = git_info(&self.cwd);
+        self.git_cache_cwd = Some(self.cwd.clone());
+        self.git_last_refresh = Some(Instant::now());
+        self.git_slow = start.elapsed() > Duration::from_millis(75);
     }
 }
 
@@ -190,6 +216,12 @@ fn display_cwd(cwd: &Path) -> String {
 }
 
 fn git_info(cwd: &Path) -> Option<GitInfo> {
+    let _git_dir = output_trimmed(
+        Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["rev-parse", "--git-dir"]),
+    )?;
     let branch = output_trimmed(
         Command::new("git")
             .arg("-C")
@@ -207,6 +239,7 @@ fn git_info(cwd: &Path) -> Option<GitInfo> {
         "status",
         "--porcelain=v1",
         "--branch",
+        "--untracked-files=no",
     ]))
     .unwrap_or_default();
     let dirty = status.lines().any(|line| !line.starts_with("##"));

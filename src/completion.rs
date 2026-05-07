@@ -6,11 +6,23 @@ use std::process::Command;
 
 pub struct PlushCompleter {
     aliases: BTreeMap<String, String>,
+    bridge_enabled: bool,
 }
 
 impl PlushCompleter {
     pub fn new(aliases: BTreeMap<String, String>) -> Self {
-        Self { aliases }
+        Self {
+            aliases,
+            bridge_enabled: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn without_bridge(aliases: BTreeMap<String, String>) -> Self {
+        Self {
+            aliases,
+            bridge_enabled: false,
+        }
     }
 }
 
@@ -35,7 +47,9 @@ impl Completer for PlushCompleter {
         } else {
             file_suggestions(start, prefix, false)
         };
-        suggestions.extend(shell_completion_bridge(start, prefix, command_position));
+        if self.bridge_enabled && should_use_shell_bridge(&suggestions, command_position, prefix) {
+            suggestions.extend(shell_completion_bridge(start, prefix, command_position));
+        }
         dedup(suggestions)
     }
 }
@@ -106,6 +120,13 @@ fn command_suggestions(
             ..Suggestion::default()
         })
         .collect()
+}
+
+fn should_use_shell_bridge(native: &[Suggestion], command_position: bool, prefix: &str) -> bool {
+    if prefix.len() > 128 {
+        return false;
+    }
+    command_position || native.is_empty()
 }
 
 fn file_suggestions(start: usize, prefix: &str, dirs_only: bool) -> Vec<Suggestion> {
@@ -375,12 +396,22 @@ mod tests {
     fn completes_alias_at_command_position() {
         let mut aliases = BTreeMap::new();
         aliases.insert("gsh".to_string(), "git show".to_string());
-        let mut completer = PlushCompleter::new(aliases);
+        let mut completer = PlushCompleter::without_bridge(aliases);
         let values = completer
             .complete("gs", 2)
             .into_iter()
             .map(|s| s.value)
             .collect::<Vec<_>>();
         assert!(values.contains(&"gsh".to_string()));
+    }
+
+    #[test]
+    fn avoids_shell_bridge_for_native_file_matches() {
+        let native = vec![Suggestion {
+            value: "Cargo.toml".to_string(),
+            ..Suggestion::default()
+        }];
+        assert!(!should_use_shell_bridge(&native, false, "Cargo"));
+        assert!(should_use_shell_bridge(&native, true, "ca"));
     }
 }
