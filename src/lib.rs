@@ -7,6 +7,7 @@ pub mod expand;
 pub mod highlight;
 pub mod interactive;
 pub mod parser;
+pub mod path_cache;
 pub mod prompt;
 pub mod shell;
 pub mod terminal;

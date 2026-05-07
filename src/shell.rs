@@ -3,6 +3,7 @@ use crate::error::{PlushError, Result};
 use crate::exec::{self, Job};
 use crate::expand::Env;
 use crate::parser;
+use crate::path_cache::PathCache;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +18,7 @@ pub struct Shell {
     pub env: Env,
     pub aliases: BTreeMap<String, String>,
     pub jobs: Vec<Job>,
+    path_cache: PathCache,
     previous_dir: Option<PathBuf>,
     config: Config,
 }
@@ -27,6 +29,7 @@ impl Shell {
             env: Env::new(),
             aliases: config.aliases.clone(),
             jobs: Vec::new(),
+            path_cache: PathCache::default(),
             previous_dir: None,
             config,
         };
@@ -110,6 +113,30 @@ impl Shell {
             }
             job.done = !any_running;
         }
+    }
+
+    pub fn resolve_program(&mut self, name: &str) -> Option<PathBuf> {
+        let path = self.env.get("PATH").map(str::to_string);
+        self.resolve_program_with_path(name, path.as_deref())
+    }
+
+    pub fn resolve_program_with_path(&mut self, name: &str, path: Option<&str>) -> Option<PathBuf> {
+        if name.contains('/') {
+            return Some(PathBuf::from(name));
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.path_cache.resolve(name, path, &cwd)
+    }
+
+    pub fn clear_path_cache(&mut self) {
+        self.path_cache.clear();
+    }
+
+    pub fn path_cache_entries(&self) -> Vec<(String, PathBuf)> {
+        self.path_cache
+            .entries()
+            .map(|(name, path)| (name.clone(), path.clone()))
+            .collect()
     }
 
     fn expand_alias(&self, line: &str) -> Result<String> {

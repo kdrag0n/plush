@@ -10,7 +10,6 @@ use std::io::{self, IsTerminal};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command as ProcessCommand, Stdio};
 
 #[derive(Debug)]
@@ -76,15 +75,24 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
         if argv.is_empty() {
             continue;
         }
-        let program = resolve_program(&argv[0], shell);
+        let assignments = expand_assignments(cmd, shell)?;
+        let lookup_path = assignments
+            .iter()
+            .rev()
+            .find_map(|(name, value)| (name == "PATH").then_some(value.clone()))
+            .or_else(|| shell.env.get("PATH").map(str::to_string));
+        let Some(program) = shell.resolve_program_with_path(&argv[0], lookup_path.as_deref())
+        else {
+            return Err(PlushError::msg(format!("command not found: {}", argv[0])));
+        };
         let mut process = ProcessCommand::new(&program);
         process.args(&argv[1..]);
         process.env_clear();
         for (k, v) in shell.env.iter() {
             process.env(k, v);
         }
-        for (name, value) in &cmd.assignments {
-            process.env(name, expand_assignment(value, &shell.env)?);
+        for (name, value) in assignments {
+            process.env(name, value);
         }
 
         if let Some(stdout) = previous_stdout.take() {
@@ -201,6 +209,7 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
             eprintln!("history: available in interactive mode");
             0
         }
+        "hash" => hash_builtin(shell, &argv[1..])?,
         "jobs" => {
             shell.reap_background_jobs();
             for job in &shell.jobs {
@@ -321,6 +330,13 @@ fn apply_redirects(process: &mut ProcessCommand, cmd: &Command, shell: &Shell) -
     Ok(())
 }
 
+fn expand_assignments(cmd: &Command, shell: &Shell) -> Result<Vec<(String, String)>> {
+    cmd.assignments
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), expand_assignment(value, &shell.env)?)))
+        .collect()
+}
+
 fn open_write(path: String, append: bool) -> io::Result<File> {
     OpenOptions::new()
         .create(true)
@@ -336,25 +352,37 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or_else(|| status.signal().map(|signal| 128 + signal).unwrap_or(1))
 }
 
-fn resolve_program(name: &str, shell: &Shell) -> PathBuf {
-    if name.contains('/') {
-        return PathBuf::from(name);
-    }
-    if let Some(path) = shell.env.get("PATH") {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        if let Ok(found) = which::which_in(name, Some(path), cwd) {
-            return found;
-        }
-    }
-    PathBuf::from(name)
-}
-
 fn spawn_error(command: &str, err: io::Error) -> PlushError {
     if err.kind() == io::ErrorKind::NotFound {
         PlushError::msg(format!("command not found: {command}"))
     } else {
         PlushError::msg(format!("{command}: {err}"))
     }
+}
+
+fn hash_builtin(shell: &mut Shell, args: &[String]) -> Result<i32> {
+    if args.is_empty() {
+        for (name, path) in shell.path_cache_entries() {
+            println!("{name}={}", path.display());
+        }
+        return Ok(0);
+    }
+
+    let mut status = 0;
+    for arg in args {
+        if arg == "-r" {
+            shell.clear_path_cache();
+            continue;
+        }
+        if arg.starts_with('-') {
+            return Err(PlushError::msg(format!("hash: bad option: {arg}")));
+        }
+        if shell.resolve_program(arg).is_none() {
+            eprintln!("hash: no such command: {arg}");
+            status = 1;
+        }
+    }
+    Ok(status)
 }
 
 fn fg_job(shell: &mut Shell, spec: Option<&str>) -> Result<i32> {

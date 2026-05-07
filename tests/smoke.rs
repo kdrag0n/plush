@@ -1,6 +1,7 @@
 use assert_cmd::prelude::*;
 use plush::{Shell, completion::complete_line, config::Config};
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
@@ -129,6 +130,56 @@ fn expands_chained_aliases_with_loop_guard() {
         .expect("alias command should run");
 
     assert_eq!(std::fs::read_to_string(file).unwrap(), "ok --flag\n");
+}
+
+#[test]
+fn hash_r_clears_negative_path_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    let exe = dir.path().join("meowcmd");
+    let mut config = Config::default();
+    config.aliases.clear();
+    let mut shell = Shell::new(config);
+    shell.env.set("PATH", dir.path().to_string_lossy());
+
+    assert!(shell.run_line("meowcmd").is_err());
+
+    std::fs::write(
+        &exe,
+        format!("#!/bin/sh\nprintf meow > {}\n", out.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(shell.run_line("meowcmd").is_err());
+    shell.run_line("hash -r").unwrap();
+    shell.run_line("meowcmd").unwrap();
+
+    assert_eq!(std::fs::read_to_string(out).unwrap(), "meow");
+}
+
+#[test]
+fn path_assignment_affects_command_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    let exe = dir.path().join("meowcmd");
+    std::fs::write(
+        &exe,
+        format!("#!/bin/sh\nprintf meow > {}\n", out.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut config = Config::default();
+    config.aliases.clear();
+    let mut shell = Shell::new(config);
+    shell.env.set("PATH", "");
+
+    shell
+        .run_line(&format!("PATH={} meowcmd", dir.path().display()))
+        .unwrap();
+
+    assert_eq!(std::fs::read_to_string(out).unwrap(), "meow");
 }
 
 #[test]
