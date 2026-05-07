@@ -22,5 +22,19 @@ expect "❯ "
 send "jobs\r"
 expect -re "(running|done) sleep 0.1"
 expect "❯ "
+
+send "sleep 5\r"
+expect "sleep"
+after 500
+send "\x1a"
+expect "stopped sleep 5"
+expect "❯ "
+send "jobs\r"
+expect "stopped sleep 5"
+expect "❯ "
+send "bg\r"
+expect "running sleep 5"
+expect "❯ "
+
 send "exit\r"
 expect eof

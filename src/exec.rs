@@ -200,7 +200,13 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
         "jobs" => {
             shell.reap_background_jobs();
             for job in &shell.jobs {
-                let state = if job.done { "done" } else { "running" };
+                let state = if job.done {
+                    "done"
+                } else if job.stopped {
+                    "stopped"
+                } else {
+                    "running"
+                };
                 println!("[{}] {} {}", job.id, state, job.command);
             }
             0
