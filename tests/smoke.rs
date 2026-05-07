@@ -56,3 +56,19 @@ fn runs_valid_bash_compound_syntax_through_compat_path() {
         .success()
         .stdout("ok\n");
 }
+
+#[test]
+fn loads_local_autoenv_on_cd_without_executing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "PLUSH_AUTOENV_TEST=meow\n").unwrap();
+    let command = format!(
+        "cd {} && /bin/sh -c 'echo $PLUSH_AUTOENV_TEST'",
+        dir.path().display()
+    );
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success()
+        .stdout("meow\n");
+}

@@ -31,6 +31,7 @@ impl Shell {
             config,
         };
         shell.load_env_file();
+        shell.load_local_autoenv();
         shell
     }
 
@@ -80,6 +81,7 @@ impl Shell {
         self.env
             .set("PWD", std::env::current_dir()?.to_string_lossy());
         crate::dirs::record(&std::env::current_dir()?);
+        self.load_local_autoenv();
         Ok(0)
     }
 
@@ -125,7 +127,22 @@ impl Shell {
         let Some(home) = dirs::home_dir() else {
             return;
         };
-        let Ok(text) = std::fs::read_to_string(home.join(".env")) else {
+        self.load_env_vars_from_file(&home.join(".env"));
+    }
+
+    fn load_local_autoenv(&mut self) {
+        if !self.config.autoenv {
+            return;
+        }
+        let Ok(cwd) = std::env::current_dir() else {
+            return;
+        };
+        self.load_env_vars_from_file(&cwd.join(".env"));
+        self.load_env_vars_from_file(&cwd.join(".plushenv"));
+    }
+
+    fn load_env_vars_from_file(&mut self, path: &std::path::Path) {
+        let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
         for line in text.lines() {

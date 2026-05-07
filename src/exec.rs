@@ -215,6 +215,21 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
             std::fs::create_dir_all(path)?;
             shell.cd(Some(path))?
         }
+        "su-user" => {
+            let Some(user) = argv.get(1) else {
+                return Err(PlushError::msg("su-user: missing user"));
+            };
+            let status = ProcessCommand::new("sudo")
+                .args(["sh", "-c"])
+                .arg(format!("cd /home/{user}; su -s /bin/bash {user}"))
+                .status()?;
+            exit_code(status)
+        }
+        "fp" => {
+            let cmd = "loc=$(printf '%s' \"$PATH\" | tr ':' '\\n' | fzf --header='[find:path]') && [ -d \"$loc\" ] && rg --files \"$loc\" | awk -F/ '{print $NF}' | fzf --header=\"[find:exe] => $loc\" >/dev/null";
+            let status = ProcessCommand::new("/bin/sh").arg("-c").arg(cmd).status()?;
+            exit_code(status)
+        }
         "wttr" => {
             let loc = argv.get(1).map(String::as_str).unwrap_or("Stanford");
             let output = ProcessCommand::new("curl")

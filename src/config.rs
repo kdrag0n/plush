@@ -9,6 +9,8 @@ pub struct Config {
     pub history_size: usize,
     #[serde(default = "default_max_interactive_parse_bytes")]
     pub max_interactive_parse_bytes: usize,
+    #[serde(default = "default_autoenv")]
+    pub autoenv: bool,
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
 }
@@ -18,6 +20,7 @@ impl Default for Config {
         Self {
             history_size: default_history_size(),
             max_interactive_parse_bytes: default_max_interactive_parse_bytes(),
+            autoenv: default_autoenv(),
             aliases: default_aliases(),
         }
     }
@@ -31,6 +34,7 @@ pub fn load() -> Config {
                 Ok(user_config) => {
                     config.history_size = user_config.history_size;
                     config.max_interactive_parse_bytes = user_config.max_interactive_parse_bytes;
+                    config.autoenv = user_config.autoenv;
                     config.aliases.extend(user_config.aliases);
                 }
                 Err(err) => eprintln!("plush: config error: {err}"),
@@ -58,6 +62,10 @@ fn default_history_size() -> usize {
 
 fn default_max_interactive_parse_bytes() -> usize {
     128 * 1024
+}
+
+fn default_autoenv() -> bool {
+    true
 }
 
 fn default_aliases() -> BTreeMap<String, String> {
