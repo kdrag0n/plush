@@ -7,8 +7,8 @@ use crate::{RunOutcome, Shell};
 use crossterm::event::{KeyCode, KeyModifiers};
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    ColumnarMenu, DefaultHinter, EditCommand, Emacs, FileBackedHistory, MenuBuilder,
-    MouseClickMode, Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+    ColumnarMenu, DefaultHinter, EditCommand, Emacs, FileBackedHistory, MenuBuilder, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use std::fs;
 use std::io::Write;
@@ -59,7 +59,6 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
 
     let mut editor = Reedline::create()
         .use_bracketed_paste(true)
-        .with_mouse_click(MouseClickMode::Enabled)
         .with_history(history)
         .with_hinter(Box::new(
             DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
@@ -83,10 +82,7 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
         println!();
         let _ = std::io::stdout().flush();
         crate::terminal::set_prompt_cursor();
-        crate::terminal::enable_line_editor_mouse();
-        let signal = editor.read_line(&prompt);
-        crate::terminal::disable_line_editor_mouse();
-        match signal {
+        match editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 if line.trim().is_empty() {
                     last_outcome = None;
