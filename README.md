@@ -26,6 +26,8 @@ the execution core synchronous and Unix-native.
 - Terminal repair escapes after foreground programs exit.
 - Directory frecency database for `z`.
 - Lightweight autoenv-style `.env` and `.plushenv` loading on `cd`.
+- PTY smoke coverage for background jobs, Ctrl-Z stopped jobs, `jobs`, and
+  `bg`.
 
 ## Validation
 
@@ -54,6 +56,6 @@ orb bash -lc 'cd /Users/dragon/code/projects/plush && target/orb/release/plush -
   forms currently go through `/bin/bash`.
 - Programmable bash/zsh completion support is on-demand and partial. Native
   completions cover the common interactive cases first.
-- Ctrl-Z/foreground job control has process-group support, but the most robust
-  PTY smoke currently covers background jobs and `jobs`; deeper suspend/resume
-  testing still needs a more faithful terminal harness.
+- Job control has PTY coverage for the core interactive flow, but edge cases
+  such as stopped multi-process pipelines and terminal mode restoration after
+  unusual full-screen program crashes need more corpus cases.
