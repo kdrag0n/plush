@@ -82,3 +82,13 @@ fn tracks_background_jobs_in_command_mode() {
         .success()
         .stdout(predicates::str::contains("running sleep 0.2"));
 }
+
+#[test]
+fn exposes_completion_inspection_cli() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["--complete", "git ch", "6"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("checkout"));
+}

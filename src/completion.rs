@@ -40,6 +40,9 @@ impl Completer for PlushCompleter {
             if command == "cd" {
                 return file_suggestions(start, prefix, true);
             }
+            if command == "git" {
+                return git_suggestions(line, start, prefix);
+            }
         }
         let command_position = is_command_position(&line[..start]);
         let mut suggestions = if command_position {
@@ -52,6 +55,11 @@ impl Completer for PlushCompleter {
         }
         dedup(suggestions)
     }
+}
+
+pub fn complete_line(aliases: BTreeMap<String, String>, line: &str, pos: usize) -> Vec<Suggestion> {
+    let mut completer = PlushCompleter::new(aliases);
+    completer.complete(line, pos)
 }
 
 fn current_word(line: &str, pos: usize) -> (usize, &str) {
@@ -83,6 +91,15 @@ fn active_command(line: &str, word_start: usize) -> Option<&str> {
         .map(|idx| idx + 1)
         .unwrap_or(0);
     prefix[segment_start..].split_whitespace().next()
+}
+
+fn active_words(line: &str, word_start: usize) -> Vec<&str> {
+    let prefix = line[..word_start].trim_end();
+    let segment_start = prefix
+        .rfind(['|', ';', '&'])
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    prefix[segment_start..].split_whitespace().collect()
 }
 
 fn command_suggestions(
@@ -183,6 +200,100 @@ fn env_suggestions(start: usize, prefix: &str) -> Vec<Suggestion> {
             })
         })
         .take(200)
+        .collect()
+}
+
+fn git_suggestions(line: &str, start: usize, prefix: &str) -> Vec<Suggestion> {
+    let words = active_words(line, start);
+    if words.len() <= 1 {
+        return git_subcommand_suggestions(start, prefix);
+    }
+
+    let subcommand = words.get(1).copied().unwrap_or("");
+    match subcommand {
+        "checkout" | "switch" | "merge" | "rebase" | "branch" | "show" | "log" => {
+            let mut out = git_refs(start, prefix);
+            if matches!(subcommand, "checkout" | "switch" | "show" | "log") {
+                out.extend(file_suggestions(start, prefix, false));
+            }
+            dedup(out)
+        }
+        "add" | "restore" | "diff" | "status" => file_suggestions(start, prefix, false),
+        _ => {
+            let mut native = file_suggestions(start, prefix, false);
+            if native.is_empty() {
+                native.extend(git_subcommand_suggestions(start, prefix));
+            }
+            native
+        }
+    }
+}
+
+fn git_subcommand_suggestions(start: usize, prefix: &str) -> Vec<Suggestion> {
+    [
+        "add",
+        "bisect",
+        "branch",
+        "checkout",
+        "cherry-pick",
+        "clone",
+        "commit",
+        "diff",
+        "fetch",
+        "grep",
+        "log",
+        "merge",
+        "pull",
+        "push",
+        "rebase",
+        "remote",
+        "reset",
+        "restore",
+        "revert",
+        "show",
+        "status",
+        "stash",
+        "switch",
+        "tag",
+    ]
+    .into_iter()
+    .filter(|cmd| cmd.starts_with(prefix))
+    .map(|value| Suggestion {
+        span: Span::new(start, start + prefix.len()),
+        value: value.to_string(),
+        description: Some("git".to_string()),
+        append_whitespace: true,
+        ..Suggestion::default()
+    })
+    .collect()
+}
+
+fn git_refs(start: usize, prefix: &str) -> Vec<Suggestion> {
+    let Ok(output) = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/tags",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|name| name.starts_with(prefix))
+        .take(200)
+        .map(|value| Suggestion {
+            span: Span::new(start, start + prefix.len()),
+            value: value.to_string(),
+            description: Some("git ref".to_string()),
+            append_whitespace: true,
+            ..Suggestion::default()
+        })
         .collect()
 }
 
@@ -390,6 +501,16 @@ mod tests {
     fn identifies_active_command() {
         assert_eq!(active_command("echo hi | ssh ", 14), Some("ssh"));
         assert_eq!(active_command("cd ", 3), Some("cd"));
+    }
+
+    #[test]
+    fn completes_git_subcommands() {
+        let values = git_suggestions("git ch", 6, "ch")
+            .into_iter()
+            .map(|s| s.value)
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"checkout".to_string()));
+        assert!(values.contains(&"cherry-pick".to_string()));
     }
 
     #[test]

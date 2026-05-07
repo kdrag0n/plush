@@ -26,6 +26,22 @@ fn main() {
                 }
             }
         }
+        Some("--complete") => {
+            let line = args.next().unwrap_or_default();
+            let pos = args
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(line.len());
+            for suggestion in
+                plush::completion::complete_line(shell.aliases.clone(), &line, pos.min(line.len()))
+            {
+                if let Some(description) = suggestion.description {
+                    println!("{}\t{}", suggestion.value, description);
+                } else {
+                    println!("{}", suggestion.value);
+                }
+            }
+        }
         Some("--repair-terminal") => {
             terminal::repair_terminal();
         }
@@ -36,6 +52,7 @@ fn main() {
             println!("  plush                 start interactive shell");
             println!("  plush -c 'command'    run a command");
             println!("  plush --validate 'command'");
+            println!("  plush --complete 'line' [cursor-byte-pos]");
             println!("  plush --repair-terminal");
         }
         Some(other) => {
