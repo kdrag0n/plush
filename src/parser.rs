@@ -39,10 +39,22 @@ pub enum Redirect {
         fd: i32,
         target: String,
     },
+    ReadWrite {
+        fd: i32,
+        target: String,
+    },
     Write {
         fd: i32,
         target: String,
         append: bool,
+    },
+    WriteBoth {
+        target: String,
+        append: bool,
+    },
+    HereString {
+        fd: i32,
+        value: String,
     },
     Duplicate {
         fd: i32,
@@ -110,7 +122,7 @@ fn parse_line_col(raw: &str) -> Option<(usize, usize)> {
 }
 
 fn parse_for_exec(input: &str) -> Result<Script> {
-    if is_likely_compound(input) {
+    if is_likely_compound(input) || has_native_unsupported_heredoc(input) {
         return Err(PlushError::Unsupported(
             "compound command runs through bash compatibility path".to_string(),
         ));
@@ -244,6 +256,7 @@ impl ExecParser {
         let (fd, kind) = parse_redirect_op(op);
         match kind {
             RedirectKind::Read => Ok(Redirect::Read { fd, target }),
+            RedirectKind::ReadWrite => Ok(Redirect::ReadWrite { fd, target }),
             RedirectKind::Write => Ok(Redirect::Write {
                 fd,
                 target,
@@ -254,6 +267,15 @@ impl ExecParser {
                 target,
                 append: true,
             }),
+            RedirectKind::WriteBoth => Ok(Redirect::WriteBoth {
+                target,
+                append: false,
+            }),
+            RedirectKind::AppendBoth => Ok(Redirect::WriteBoth {
+                target,
+                append: true,
+            }),
+            RedirectKind::HereString => Ok(Redirect::HereString { fd, value: target }),
             RedirectKind::Duplicate => {
                 if target == "-" {
                     Ok(Redirect::Close { fd })
@@ -298,8 +320,12 @@ impl ExecParser {
 #[derive(Debug, Clone, Copy)]
 enum RedirectKind {
     Read,
+    ReadWrite,
     Write,
     Append,
+    WriteBoth,
+    AppendBoth,
+    HereString,
     Duplicate,
 }
 
@@ -313,8 +339,12 @@ fn parse_redirect_op(op: &str) -> (i32, RedirectKind) {
     let body = &op[split..];
     let kind = match body {
         "<" => RedirectKind::Read,
+        "<>" => RedirectKind::ReadWrite,
         ">" | ">|" => RedirectKind::Write,
         ">>" => RedirectKind::Append,
+        "&>" => RedirectKind::WriteBoth,
+        "&>>" => RedirectKind::AppendBoth,
+        "<<<" => RedirectKind::HereString,
         "<&" | ">&" => RedirectKind::Duplicate,
         _ => RedirectKind::Write,
     };
@@ -367,6 +397,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                 out.push(Token::AndIf);
                 i += 2;
             }
+            '&' if bytes.get(i + 1) == Some(&b'>') => {
+                if bytes.get(i + 2) == Some(&b'>') {
+                    out.push(Token::Redirect("&>>".to_string()));
+                    i += 3;
+                } else {
+                    out.push(Token::Redirect("&>".to_string()));
+                    i += 2;
+                }
+            }
             '&' => {
                 out.push(Token::Amp);
                 i += 1;
@@ -374,9 +413,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             '<' | '>' => {
                 let start = i;
                 i += 1;
+                if bytes.get(i) == Some(&b'<') && bytes.get(i + 1) == Some(&b'<') {
+                    i += 2;
+                    out.push(Token::Redirect(input[start..i].to_string()));
+                    continue;
+                }
                 if bytes.get(i) == Some(&bytes[start])
                     || bytes.get(i) == Some(&b'&')
                     || bytes.get(i) == Some(&b'|')
+                    || (bytes[start] == b'<' && bytes.get(i) == Some(&b'>'))
                 {
                     i += 1;
                 }
@@ -419,6 +464,12 @@ fn redirect_after_fd(input: &str, start: usize) -> Option<usize> {
     match bytes.get(i).copied() {
         Some(b'<') | Some(b'>') => {
             i += 1;
+            if bytes.get(i - 1) == Some(&b'<')
+                && bytes.get(i) == Some(&b'<')
+                && bytes.get(i + 1) == Some(&b'<')
+            {
+                return Some(i + 2);
+            }
             if matches!(
                 bytes.get(i),
                 Some(b'<') | Some(b'>') | Some(b'&') | Some(b'|')
@@ -429,6 +480,22 @@ fn redirect_after_fd(input: &str, start: usize) -> Option<usize> {
         }
         _ => None,
     }
+}
+
+fn has_native_unsupported_heredoc(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i + 1] == b'<' {
+            if bytes.get(i + 2) != Some(&b'<') {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 fn read_word(input: &str, start: usize) -> Result<(String, usize)> {

@@ -32,6 +32,147 @@ fn runs_pipeline_and_redirection() {
 }
 
 #[test]
+fn redirects_builtins() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pwd");
+    let command = format!("pwd > {} && cat {}", file.display(), file.display());
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("plush"));
+}
+
+#[test]
+fn preserves_redirection_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out");
+    let command = format!(
+        "/bin/sh -c 'echo out; echo err >&2' 2>&1 > {}",
+        file.display()
+    );
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success()
+        .stdout("err\n");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "out\n");
+}
+
+#[test]
+fn redirects_arbitrary_file_descriptors() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    let output = dir.path().join("out");
+    std::fs::write(&input, "meow\n").unwrap();
+    let command = format!(
+        "/bin/sh -c 'cat <&3 >&4' 3<{} 4>{}",
+        input.display(),
+        output.display()
+    );
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(output).unwrap(), "meow\n");
+}
+
+#[test]
+fn closes_redirected_file_descriptors() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "/bin/sh -c 'echo hidden >&2' 2>&-"])
+        .assert()
+        .failure()
+        .stderr("");
+}
+
+#[test]
+fn supports_combined_stdout_stderr_redirection() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("both");
+    let command = format!(
+        "/bin/sh -c 'echo out; echo err >&2' &> {} && cat {}",
+        file.display(),
+        file.display()
+    );
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("out\n"))
+        .stdout(predicates::str::contains("err\n"));
+}
+
+#[test]
+fn supports_combined_append_redirection() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("both");
+    std::fs::write(&file, "start\n").unwrap();
+    let command = format!(
+        "/bin/sh -c 'echo out; echo err >&2' &>> {} && cat {}",
+        file.display(),
+        file.display()
+    );
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success()
+        .stdout("start\nout\nerr\n");
+}
+
+#[test]
+fn supports_read_write_redirection() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("created");
+    let command = format!(": <> {}", file.display());
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success();
+    assert!(file.exists());
+}
+
+#[test]
+fn supports_redirection_only_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("created");
+    let command = format!("> {}", file.display());
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success();
+    assert!(file.exists());
+}
+
+#[test]
+fn supports_here_strings_natively() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "cat <<< meow"])
+        .assert()
+        .success()
+        .stdout("meow\n");
+}
+
+#[test]
+fn runs_heredocs_through_bash_compatibility() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "cat <<EOF\nmeow\nEOF"])
+        .assert()
+        .success()
+        .stdout("meow\n");
+}
+
+#[test]
 fn applies_assignment_to_command_environment() {
     Command::cargo_bin("plush")
         .unwrap()

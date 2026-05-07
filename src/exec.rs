@@ -5,10 +5,12 @@ use crate::shell::Shell;
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
+use std::ffi::CString;
 use std::fs::{File, OpenOptions};
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -46,7 +48,7 @@ pub fn run_bash_compat(shell: &mut Shell, line: &str) -> Result<i32> {
     for (k, v) in shell.env.iter() {
         process.env(k, v);
     }
-    configure_child_process_group(&mut process, None);
+    configure_child_process(&mut process, None, Vec::new());
     let child = process.spawn()?;
     let pgid = Pid::from_raw(child.id() as i32);
     let _ = nix::unistd::setpgid(pgid, pgid);
@@ -109,8 +111,8 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
         if idx < pipeline.commands.len() - 1 {
             process.stdout(Stdio::piped());
         }
-        apply_redirects(&mut process, cmd, shell)?;
-        configure_child_process_group(&mut process, pgid);
+        let redirections = redirection_actions(cmd, shell)?;
+        configure_child_process(&mut process, pgid, redirections);
 
         let mut child = process.spawn().map_err(|err| spawn_error(&argv[0], err))?;
         let child_pid = Pid::from_raw(child.id() as i32);
@@ -145,12 +147,23 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
 fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
     let argv = expand_words(&cmd.words, &shell.env)?;
     let Some(name) = argv.first().map(String::as_str) else {
+        let redirections = redirection_actions(cmd, shell)?;
+        let _guard = RedirectionGuard::apply(&redirections)?;
         for (name, value) in &cmd.assignments {
             let value = expand_assignment(value, &shell.env)?;
             shell.env.set(name, value);
         }
         return Ok(Some(0));
     };
+
+    let is_builtin_command =
+        is_builtin(name) || (argv.len() == 1 && std::path::Path::new(name).is_dir());
+    if !is_builtin_command {
+        return Ok(None);
+    }
+
+    let redirections = redirection_actions(cmd, shell)?;
+    let _guard = RedirectionGuard::apply(&redirections)?;
 
     let status = match name {
         ":" | "true" => 0,
@@ -312,47 +325,9 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
         "ks" => fzf_kill(false, true, argv.get(1).map(String::as_str))?,
         "sks" => fzf_kill(true, true, argv.get(1).map(String::as_str))?,
         _ if argv.len() == 1 && std::path::Path::new(name).is_dir() => shell.cd(Some(name))?,
-        _ => return Ok(None),
+        _ => unreachable!("builtin candidate checked before applying redirections"),
     };
     Ok(Some(status))
-}
-
-fn apply_redirects(process: &mut ProcessCommand, cmd: &Command, shell: &Shell) -> Result<()> {
-    for redirect in &cmd.redirects {
-        match redirect {
-            Redirect::Read { fd: 0, target } => {
-                process.stdin(Stdio::from(File::open(expand_word(target, &shell.env)?)?));
-            }
-            Redirect::Write {
-                fd: 1,
-                target,
-                append,
-            } => {
-                process.stdout(Stdio::from(open_write(
-                    expand_word(target, &shell.env)?,
-                    *append,
-                )?));
-            }
-            Redirect::Write {
-                fd: 2,
-                target,
-                append,
-            } => {
-                process.stderr(Stdio::from(open_write(
-                    expand_word(target, &shell.env)?,
-                    *append,
-                )?));
-            }
-            Redirect::Duplicate { fd: 2, target: 1 } => {
-                process.stderr(Stdio::inherit());
-            }
-            Redirect::Close { .. } => {}
-            other => {
-                return Err(PlushError::Unsupported(format!("redirection {other:?}")));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn expand_assignments(cmd: &Command, shell: &Shell) -> Result<Vec<(String, String)>> {
@@ -362,13 +337,288 @@ fn expand_assignments(cmd: &Command, shell: &Shell) -> Result<Vec<(String, Strin
         .collect()
 }
 
-fn open_write(path: String, append: bool) -> io::Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(!append)
-        .append(append)
-        .open(path)
+#[derive(Debug)]
+enum RedirectionAction {
+    Open {
+        fd: i32,
+        path: CString,
+        flags: i32,
+        mode: libc::mode_t,
+    },
+    Dup {
+        fd: i32,
+        target: i32,
+    },
+    Close {
+        fd: i32,
+    },
+    HereString {
+        fd: i32,
+        file: File,
+    },
+}
+
+fn redirection_actions(cmd: &Command, shell: &Shell) -> Result<Vec<RedirectionAction>> {
+    let mut actions = Vec::new();
+    for redirect in &cmd.redirects {
+        match redirect {
+            Redirect::Read { fd, target } => actions.push(RedirectionAction::Open {
+                fd: *fd,
+                path: c_path(expand_word(target, &shell.env)?)?,
+                flags: libc::O_RDONLY,
+                mode: 0,
+            }),
+            Redirect::ReadWrite { fd, target } => actions.push(RedirectionAction::Open {
+                fd: *fd,
+                path: c_path(expand_word(target, &shell.env)?)?,
+                flags: libc::O_RDWR | libc::O_CREAT,
+                mode: 0o666,
+            }),
+            Redirect::Write { fd, target, append } => {
+                let mut flags = libc::O_WRONLY | libc::O_CREAT;
+                flags |= if *append {
+                    libc::O_APPEND
+                } else {
+                    libc::O_TRUNC
+                };
+                actions.push(RedirectionAction::Open {
+                    fd: *fd,
+                    path: c_path(expand_word(target, &shell.env)?)?,
+                    flags,
+                    mode: 0o666,
+                });
+            }
+            Redirect::WriteBoth { target, append } => {
+                let mut flags = libc::O_WRONLY | libc::O_CREAT;
+                flags |= if *append {
+                    libc::O_APPEND
+                } else {
+                    libc::O_TRUNC
+                };
+                actions.push(RedirectionAction::Open {
+                    fd: 1,
+                    path: c_path(expand_word(target, &shell.env)?)?,
+                    flags,
+                    mode: 0o666,
+                });
+                actions.push(RedirectionAction::Dup { fd: 2, target: 1 });
+            }
+            Redirect::HereString { fd, value } => {
+                let mut expanded = expand_word(value, &shell.env)?.into_bytes();
+                expanded.push(b'\n');
+                actions.push(RedirectionAction::HereString {
+                    fd: *fd,
+                    file: here_string_file(&expanded)?,
+                });
+            }
+            Redirect::Duplicate { fd, target } => actions.push(RedirectionAction::Dup {
+                fd: *fd,
+                target: *target,
+            }),
+            Redirect::Close { fd } => actions.push(RedirectionAction::Close { fd: *fd }),
+        }
+    }
+    Ok(actions)
+}
+
+fn c_path(path: String) -> Result<CString> {
+    CString::new(Path::new(&path).as_os_str().as_bytes())
+        .map_err(|_| PlushError::msg(format!("redirection path contains NUL: {path:?}")))
+}
+
+fn here_string_file(data: &[u8]) -> Result<File> {
+    let mut last_err = None;
+    for attempt in 0..100 {
+        let path =
+            std::env::temp_dir().join(format!("plush-herestr-{}-{attempt}", std::process::id()));
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let _ = std::fs::remove_file(&path);
+                file.write_all(data)?;
+                file.seek(SeekFrom::Start(0))?;
+                // The temp fd is only a source for dup2(); the installed target fd
+                // must remain inheritable, but this source should not leak across exec.
+                set_cloexec(file.as_raw_fd())?;
+                return Ok(file);
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                last_err = Some(err);
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "temporary file exists"))
+        .into())
+}
+
+fn set_cloexec(fd: i32) -> io::Result<()> {
+    set_fd_cloexec(fd, true)
+}
+
+fn clear_cloexec(fd: i32) -> io::Result<()> {
+    set_fd_cloexec(fd, false)
+}
+
+fn set_fd_cloexec(fd: i32, enabled: bool) -> io::Result<()> {
+    unsafe {
+        let mut flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if enabled {
+            flags |= libc::FD_CLOEXEC;
+        } else {
+            flags &= !libc::FD_CLOEXEC;
+        }
+        if libc::fcntl(fd, libc::F_SETFD, flags) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+struct RedirectionGuard {
+    saved: Vec<SavedFd>,
+}
+
+struct SavedFd {
+    fd: i32,
+    saved: Option<i32>,
+}
+
+impl RedirectionGuard {
+    fn apply(actions: &[RedirectionAction]) -> Result<Self> {
+        let mut saved = Vec::new();
+        for action in actions {
+            for fd in action.touched_fds() {
+                if saved.iter().any(|saved: &SavedFd| saved.fd == fd) {
+                    continue;
+                }
+                saved.push(SavedFd {
+                    fd,
+                    saved: dup_cloexec(fd)?,
+                });
+            }
+            apply_redirection_action(action)?;
+        }
+        Ok(Self { saved })
+    }
+}
+
+impl Drop for RedirectionGuard {
+    fn drop(&mut self) {
+        for saved in self.saved.iter().rev() {
+            unsafe {
+                match saved.saved {
+                    Some(saved_fd) => {
+                        let _ = libc::dup2(saved_fd, saved.fd);
+                        let _ = libc::close(saved_fd);
+                    }
+                    None => {
+                        let _ = libc::close(saved.fd);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl RedirectionAction {
+    fn touched_fds(&self) -> Vec<i32> {
+        match self {
+            RedirectionAction::Open { fd, .. }
+            | RedirectionAction::Dup { fd, .. }
+            | RedirectionAction::Close { fd }
+            | RedirectionAction::HereString { fd, .. } => vec![*fd],
+        }
+    }
+}
+
+fn dup_cloexec(fd: i32) -> Result<Option<i32>> {
+    unsafe {
+        if libc::fcntl(fd, libc::F_GETFD) == -1 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EBADF) {
+                return Ok(None);
+            }
+            return Err(err.into());
+        }
+        // Saved shell fds are restoration handles only. Keep them close-on-exec so
+        // builtins that spawn helpers do not leak private copies into children.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let saved = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let saved = {
+            let saved = libc::fcntl(fd, libc::F_DUPFD, 10);
+            if saved != -1 {
+                let _ = libc::fcntl(saved, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            saved
+        };
+        if saved == -1 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(Some(saved))
+    }
+}
+
+fn apply_redirection_action(action: &RedirectionAction) -> io::Result<()> {
+    unsafe {
+        match action {
+            RedirectionAction::Open {
+                fd,
+                path,
+                flags,
+                mode,
+            } => {
+                let opened = libc::open(path.as_ptr(), *flags, *mode as libc::c_uint);
+                if opened == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if opened != *fd {
+                    if libc::dup2(opened, *fd) == -1 {
+                        let err = io::Error::last_os_error();
+                        let _ = libc::close(opened);
+                        return Err(err);
+                    }
+                    if libc::close(opened) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+            }
+            RedirectionAction::Dup { fd, target } => {
+                if libc::dup2(*target, *fd) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            RedirectionAction::Close { fd } => {
+                if libc::close(*fd) == -1 {
+                    let err = io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::EBADF) {
+                        return Err(err);
+                    }
+                }
+            }
+            RedirectionAction::HereString { fd, file } => {
+                let source = file.as_raw_fd();
+                if source != *fd {
+                    if libc::dup2(source, *fd) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                } else {
+                    clear_cloexec(*fd)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {
@@ -608,8 +858,7 @@ fn run_external_single(shell: &mut Shell, cmd: &Command, argv: &[String]) -> Res
     for (key, value) in assignments {
         process.env(key, value);
     }
-    apply_redirects(&mut process, cmd, shell)?;
-    configure_child_process_group(&mut process, None);
+    configure_child_process(&mut process, None, Vec::new());
     let child = process.spawn().map_err(|err| spawn_error(name, err))?;
     let pgid = Pid::from_raw(child.id() as i32);
     let _ = nix::unistd::setpgid(pgid, pgid);
@@ -691,13 +940,20 @@ fn job_group(job: &Job) -> Option<Pid> {
         .map(|child| Pid::from_raw(child.id() as i32))
 }
 
-fn configure_child_process_group(process: &mut ProcessCommand, pgid: Option<Pid>) {
+fn configure_child_process(
+    process: &mut ProcessCommand,
+    pgid: Option<Pid>,
+    redirections: Vec<RedirectionAction>,
+) {
     unsafe {
         process.pre_exec(move || {
             let pid = libc::getpid();
             let group = pgid.map_or(pid, |pgid| pgid.as_raw());
             if libc::setpgid(0, group) == -1 {
                 return Err(io::Error::last_os_error());
+            }
+            for action in &redirections {
+                apply_redirection_action(action)?;
             }
             signal::signal(Signal::SIGINT, SigHandler::SigDfl).map_err(io::Error::other)?;
             signal::signal(Signal::SIGQUIT, SigHandler::SigDfl).map_err(io::Error::other)?;
