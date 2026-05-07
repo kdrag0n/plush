@@ -129,6 +129,13 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
         ":" | "true" => 0,
         "false" => 1,
         "cd" => shell.cd(argv.get(1).map(String::as_str))?,
+        "z" => {
+            let Some(query) = argv.get(1) else {
+                return Err(PlushError::msg("z: missing query"));
+            };
+            let target = crate::dirs::find(query)?;
+            shell.cd(Some(&target.to_string_lossy()))?
+        }
         "pwd" => {
             println!("{}", std::env::current_dir()?.display());
             0
@@ -233,6 +240,7 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
         "skp" => fzf_kill(true, false, argv.get(1).map(String::as_str))?,
         "ks" => fzf_kill(false, true, argv.get(1).map(String::as_str))?,
         "sks" => fzf_kill(true, true, argv.get(1).map(String::as_str))?,
+        _ if argv.len() == 1 && std::path::Path::new(name).is_dir() => shell.cd(Some(name))?,
         _ => return Ok(None),
     };
     Ok(Some(status))

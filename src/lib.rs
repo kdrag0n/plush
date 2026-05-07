@@ -1,5 +1,6 @@
 pub mod completion;
 pub mod config;
+pub mod dirs;
 pub mod error;
 pub mod exec;
 pub mod expand;

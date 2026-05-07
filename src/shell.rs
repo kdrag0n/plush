@@ -71,6 +71,7 @@ impl Shell {
         self.env.set("OLDPWD", old.to_string_lossy());
         self.env
             .set("PWD", std::env::current_dir()?.to_string_lossy());
+        crate::dirs::record(&std::env::current_dir()?);
         Ok(0)
     }
 
