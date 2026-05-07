@@ -20,7 +20,8 @@ the execution core synchronous and Unix-native.
 - Native execution for simple commands, assignments, aliases, pipelines,
   redirections, `&&`, `||`, `;`, and `&`.
 - Bash compatibility fallback for supported Bash compound syntax not yet
-  lowered to the native executor.
+  lowered to the native executor; fallback commands still run in the foreground
+  job-control path.
 - Builtins: `cd`, `pwd`, `exit`, `export`, `unset`, `alias`, `source`, `jobs`,
   `fg`, `bg`, `disown`, `mkc`, `z`, `wttr`, `notify`, `kp`, `skp`, `ks`, `sks`,
   `fp`, and `su-user`.
@@ -30,7 +31,7 @@ the execution core synchronous and Unix-native.
 - Directory frecency database for `z`.
 - Lightweight autoenv-style `.env` and `.plushenv` loading on `cd`.
 - PTY smoke coverage for background jobs, Ctrl-Z stopped jobs, stopped
-  foreground pipelines, `jobs`, and `bg`.
+  foreground pipelines, stopped Bash fallback jobs, `jobs`, and `bg`.
 
 ## Validation
 

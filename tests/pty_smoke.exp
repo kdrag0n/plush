@@ -49,5 +49,18 @@ send "bg\r"
 expect "running sleep 5 | cat"
 expect "❯ "
 
+send "if true; then echo fallback-started; sleep 5; fi\r"
+expect "fallback-started"
+after 500
+send "\x1a"
+expect "stopped if true; then echo fallback-started; sleep 5; fi"
+expect "❯ "
+send "jobs\r"
+expect "stopped if true; then echo fallback-started; sleep 5; fi"
+expect "❯ "
+send "bg\r"
+expect "running if true; then echo fallback-started; sleep 5; fi"
+expect "❯ "
+
 send "exit\r"
 expect eof
