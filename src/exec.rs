@@ -8,8 +8,10 @@ use nix::unistd::Pid;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command as ProcessCommand, Stdio};
 
 #[derive(Debug)]
@@ -52,6 +54,12 @@ pub fn run_bash_compat(shell: &mut Shell, line: &str) -> Result<i32> {
     crate::terminal::repair_terminal();
     Ok(status)
 }
+
+const BUILTIN_NAMES: &[&str] = &[
+    ":", "true", "false", "cd", "z", "pwd", "exit", "export", "unset", "alias", "reload", "source",
+    ".", "history", "hash", "jobs", "fg", "bg", "disown", "pushd", "popd", "dirs", "type",
+    "command", "which", "mkc", "su-user", "fp", "wttr", "notify", "kp", "skp", "ks", "sks",
+];
 
 fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
     if pipeline.commands.len() == 1 && !pipeline.background {
@@ -210,6 +218,9 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
             0
         }
         "hash" => hash_builtin(shell, &argv[1..])?,
+        "type" => type_builtin(shell, &argv[1..])?,
+        "which" => which_builtin(shell, &argv[1..])?,
+        "command" => command_builtin(shell, cmd, &argv[1..])?,
         "jobs" => {
             shell.reap_background_jobs();
             for job in &shell.jobs {
@@ -227,6 +238,20 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
         "fg" => fg_job(shell, argv.get(1).map(String::as_str))?,
         "bg" => bg_job(shell, argv.get(1).map(String::as_str))?,
         "disown" => disown_job(shell, argv.get(1).map(String::as_str))?,
+        "pushd" => {
+            shell.pushd(argv.get(1).map(String::as_str))?;
+            print_dirs(shell);
+            0
+        }
+        "popd" => {
+            shell.popd()?;
+            print_dirs(shell);
+            0
+        }
+        "dirs" => {
+            print_dirs(shell);
+            0
+        }
         "mkc" => {
             let Some(path) = argv.get(1) else {
                 return Err(PlushError::msg("mkc: missing directory"));
@@ -360,6 +385,239 @@ fn spawn_error(command: &str, err: io::Error) -> PlushError {
     }
 }
 
+fn is_builtin(name: &str) -> bool {
+    BUILTIN_NAMES.contains(&name)
+}
+
+fn print_dirs(shell: &Shell) {
+    println!(
+        "{}",
+        shell
+            .dirs()
+            .into_iter()
+            .map(|dir| display_path(&dir))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+}
+
+fn display_path(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = path.strip_prefix(home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn type_builtin(shell: &mut Shell, args: &[String]) -> Result<i32> {
+    let mut all = false;
+    let mut names = Vec::new();
+    for arg in args {
+        if arg == "-a" {
+            all = true;
+        } else {
+            names.push(arg.as_str());
+        }
+    }
+    if names.is_empty() {
+        return Err(PlushError::msg("type: missing name"));
+    }
+
+    let mut status = 0;
+    for name in names {
+        if !describe_command(shell, name, all, true) {
+            eprintln!("type: {name}: not found");
+            status = 1;
+        }
+    }
+    Ok(status)
+}
+
+fn which_builtin(shell: &Shell, args: &[String]) -> Result<i32> {
+    let mut all = false;
+    let mut names = Vec::new();
+    for arg in args {
+        if arg == "-a" {
+            all = true;
+        } else if arg.starts_with('-') {
+            return Err(PlushError::msg(format!("which: bad option: {arg}")));
+        } else {
+            names.push(arg.as_str());
+        }
+    }
+    if names.is_empty() {
+        return Err(PlushError::msg("which: missing name"));
+    }
+
+    let mut status = 0;
+    for name in names {
+        let paths = path_candidates(name, shell);
+        if paths.is_empty() {
+            status = 1;
+            continue;
+        }
+        for path in paths.into_iter().take(if all { usize::MAX } else { 1 }) {
+            println!("{}", path.display());
+        }
+    }
+    Ok(status)
+}
+
+fn command_builtin(shell: &mut Shell, cmd: &Command, args: &[String]) -> Result<i32> {
+    if args.is_empty() {
+        return Ok(0);
+    }
+
+    let mut verbose = false;
+    let mut concise = false;
+    let mut idx = 0;
+    while let Some(arg) = args.get(idx) {
+        match arg.as_str() {
+            "--" => {
+                idx += 1;
+                break;
+            }
+            "-v" => {
+                concise = true;
+                idx += 1;
+            }
+            "-V" => {
+                verbose = true;
+                idx += 1;
+            }
+            _ if arg.starts_with('-') => {
+                return Err(PlushError::msg(format!("command: bad option: {arg}")));
+            }
+            _ => break,
+        }
+    }
+
+    let rest = &args[idx..];
+    if concise || verbose {
+        if rest.is_empty() {
+            return Err(PlushError::msg("command: missing name"));
+        }
+        let mut status = 0;
+        for name in rest {
+            let found = if verbose {
+                describe_command(shell, name, false, true)
+            } else {
+                describe_command(shell, name, false, false)
+            };
+            if !found {
+                status = 1;
+            }
+        }
+        return Ok(status);
+    }
+
+    run_external_single(shell, cmd, rest)
+}
+
+fn describe_command(shell: &mut Shell, name: &str, all: bool, verbose: bool) -> bool {
+    let mut found = false;
+    if let Some(alias) = shell.aliases.get(name) {
+        found = true;
+        if verbose {
+            println!("{name} is an alias for {alias}");
+        } else {
+            println!("{alias}");
+        }
+        if !all {
+            return true;
+        }
+    }
+    if is_builtin(name) {
+        found = true;
+        if verbose {
+            println!("{name} is a shell builtin");
+        } else {
+            println!("{name}");
+        }
+        if !all {
+            return true;
+        }
+    }
+
+    let paths = if all {
+        path_candidates(name, shell)
+    } else {
+        shell.resolve_program(name).into_iter().collect()
+    };
+    for path in paths {
+        found = true;
+        if verbose {
+            println!("{name} is {}", path.display());
+        } else {
+            println!("{}", path.display());
+        }
+        if !all {
+            break;
+        }
+    }
+    found
+}
+
+fn path_candidates(name: &str, shell: &Shell) -> Vec<PathBuf> {
+    if name.contains('/') {
+        let path = PathBuf::from(name);
+        return is_executable_file(&path)
+            .then_some(path)
+            .into_iter()
+            .collect();
+    }
+    let Some(path) = shell.env.get("PATH") else {
+        return Vec::new();
+    };
+    std::env::split_paths(path)
+        .map(|dir| dir.join(name))
+        .filter(|path| is_executable_file(path))
+        .collect()
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    path.metadata()
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn run_external_single(shell: &mut Shell, cmd: &Command, argv: &[String]) -> Result<i32> {
+    let Some(name) = argv.first() else {
+        return Ok(0);
+    };
+    let assignments = expand_assignments(cmd, shell)?;
+    let lookup_path = assignments
+        .iter()
+        .rev()
+        .find_map(|(name, value)| (name == "PATH").then_some(value.clone()))
+        .or_else(|| shell.env.get("PATH").map(str::to_string));
+    let Some(program) = shell.resolve_program_with_path(name, lookup_path.as_deref()) else {
+        return Err(PlushError::msg(format!("command not found: {name}")));
+    };
+
+    let mut process = ProcessCommand::new(program);
+    process.args(&argv[1..]);
+    process.env_clear();
+    for (key, value) in shell.env.iter() {
+        process.env(key, value);
+    }
+    for (key, value) in assignments {
+        process.env(key, value);
+    }
+    apply_redirects(&mut process, cmd, shell)?;
+    configure_child_process_group(&mut process, None);
+    let child = process.spawn().map_err(|err| spawn_error(name, err))?;
+    let pgid = Pid::from_raw(child.id() as i32);
+    let _ = nix::unistd::setpgid(pgid, pgid);
+    let status = wait_foreground_job(Some(pgid), &argv.join(" "), vec![child], shell)?;
+    crate::terminal::repair_terminal();
+    Ok(status)
+}
+
 fn hash_builtin(shell: &mut Shell, args: &[String]) -> Result<i32> {
     if args.is_empty() {
         for (name, path) in shell.path_cache_entries() {
@@ -372,6 +630,7 @@ fn hash_builtin(shell: &mut Shell, args: &[String]) -> Result<i32> {
     for arg in args {
         if arg == "-r" {
             shell.clear_path_cache();
+            crate::completion::clear_command_cache();
             continue;
         }
         if arg.starts_with('-') {

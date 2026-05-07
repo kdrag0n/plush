@@ -226,47 +226,41 @@ fn display_cwd(cwd: &Path) -> String {
 }
 
 fn git_info(cwd: &Path) -> Option<GitInfo> {
-    let _git_dir = output_trimmed(
-        Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(["rev-parse", "--git-dir"]),
-    )?;
-    let branch = output_trimmed(
-        Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(["branch", "--show-current"]),
-    )
-    .or_else(|| {
-        output_trimmed(Command::new("git").arg("-C").arg(cwd).args([
-            "rev-parse",
-            "--short",
-            "HEAD",
-        ]))
-    })?;
-    let status = output_trimmed(Command::new("git").arg("-C").arg(cwd).args([
-        "status",
-        "--porcelain=v1",
-        "--branch",
-        "--untracked-files=no",
-    ]))
-    .unwrap_or_default();
-    let dirty = status.lines().any(|line| !line.starts_with("##"));
-    let ahead = status
-        .lines()
-        .next()
-        .is_some_and(|line| line.contains("ahead"));
-    let behind = status
-        .lines()
-        .next()
-        .is_some_and(|line| line.contains("behind"));
+    let repo = gix::discover(cwd).ok()?;
+    let branch = repo
+        .head_name()
+        .ok()
+        .flatten()
+        .map(|name| name.shorten().to_string())
+        .or_else(|| repo.head_id().ok().map(|id| id.shorten_or_id().to_string()))?;
+    let dirty = repo.is_dirty().unwrap_or(false);
+    let (ahead, behind) = ahead_behind(&repo).unwrap_or((false, false));
     Some(GitInfo {
         branch,
         dirty,
         ahead,
         behind,
     })
+}
+
+fn ahead_behind(repo: &gix::Repository) -> Option<(bool, bool)> {
+    let head = repo.head_id().ok()?.detach();
+    let upstream = repo.rev_parse_single("@{upstream}").ok()?.detach();
+    let ahead = repo
+        .rev_walk([head])
+        .with_hidden([upstream])
+        .all()
+        .ok()?
+        .next()
+        .is_some();
+    let behind = repo
+        .rev_walk([upstream])
+        .with_hidden([head])
+        .all()
+        .ok()?
+        .next()
+        .is_some();
+    Some((ahead, behind))
 }
 
 fn output_trimmed(command: &mut Command) -> Option<String> {
@@ -347,5 +341,11 @@ mod tests {
             prompt.render_prompt_indicator(PromptEditMode::Default),
             "\x1b[38;5;242mvenv\x1b[0m \x1b[31m❯\x1b[0m "
         );
+    }
+
+    #[test]
+    fn git_info_reads_current_repo_without_shelling_out() {
+        let info = git_info(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        assert!(!info.branch.is_empty());
     }
 }

@@ -1,9 +1,13 @@
-use plush::{Shell, config, interactive, parser, terminal};
+use plush::{Shell, config, interactive, parser, profile::StartupProfile, terminal};
 
 fn main() {
+    let mut profile = StartupProfile::from_env();
+    profile.mark("start");
     let mut args = std::env::args().skip(1);
     let config = config::load();
+    profile.mark("config loaded");
     let mut shell = Shell::new(config);
+    profile.mark("shell initialized");
 
     match args.next().as_deref() {
         Some("-c") | Some("--command") => {
@@ -59,12 +63,15 @@ fn main() {
             eprintln!("plush: unknown argument: {other}");
             std::process::exit(2);
         }
-        None => match interactive::run_interactive(&mut shell) {
-            Ok(code) => std::process::exit(code),
-            Err(err) => {
-                eprintln!("plush: {err}");
-                std::process::exit(1);
+        None => {
+            profile.mark("entering interactive mode");
+            match interactive::run_interactive(&mut shell) {
+                Ok(code) => std::process::exit(code),
+                Err(err) => {
+                    eprintln!("plush: {err}");
+                    std::process::exit(1);
+                }
             }
-        },
+        }
     }
 }

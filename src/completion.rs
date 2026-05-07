@@ -1,8 +1,10 @@
 use reedline::{Completer, Span, Suggestion};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 const MAX_COMPLETION_LINE_BYTES: usize = 128 * 1024;
 const MAX_COMPLETION_PREFIX_BYTES: usize = 512;
@@ -76,6 +78,14 @@ pub fn complete_line(aliases: BTreeMap<String, String>, line: &str, pos: usize) 
     completer.complete(line, pos)
 }
 
+pub fn clear_command_cache() {
+    if let Some(cache) = COMMAND_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.clear();
+        }
+    }
+}
+
 fn current_word(line: &str, pos: usize) -> (usize, &str) {
     let mut start = pos;
     for (idx, ch) in line[..pos].char_indices().rev() {
@@ -128,18 +138,11 @@ fn command_suggestions(
             .filter(|name| name.starts_with(prefix))
             .cloned(),
     );
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with(prefix) {
-                        values.insert(name);
-                    }
-                }
-            }
-        }
-    }
+    values.extend(
+        cached_path_commands()
+            .into_iter()
+            .filter(|name| name.starts_with(prefix)),
+    );
     values
         .into_iter()
         .take(200)
@@ -151,6 +154,64 @@ fn command_suggestions(
             ..Suggestion::default()
         })
         .collect()
+}
+
+#[derive(Default)]
+struct CommandCache {
+    path: String,
+    cwd: PathBuf,
+    commands: Vec<String>,
+}
+
+impl CommandCache {
+    fn clear(&mut self) {
+        self.commands.clear();
+        self.path.clear();
+        self.cwd = PathBuf::new();
+    }
+
+    fn commands(&mut self) -> Vec<String> {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if self.path != path || self.cwd != cwd || self.commands.is_empty() {
+            self.path = path;
+            self.cwd = cwd;
+            self.commands = collect_path_commands(&self.path);
+        }
+        self.commands.clone()
+    }
+}
+
+static COMMAND_CACHE: OnceLock<Mutex<CommandCache>> = OnceLock::new();
+
+fn cached_path_commands() -> Vec<String> {
+    COMMAND_CACHE
+        .get_or_init(|| Mutex::new(CommandCache::default()))
+        .lock()
+        .map(|mut cache| cache.commands())
+        .unwrap_or_default()
+}
+
+fn collect_path_commands(path: &str) -> Vec<String> {
+    let mut values = BTreeSet::new();
+    for dir in std::env::split_paths(path) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !is_executable_file(&path) {
+                    continue;
+                }
+                values.insert(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    values.into_iter().collect()
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    path.metadata()
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 fn should_use_shell_bridge(native: &[Suggestion], command_position: bool, prefix: &str) -> bool {
@@ -283,27 +344,33 @@ fn git_subcommand_suggestions(start: usize, prefix: &str) -> Vec<Suggestion> {
 }
 
 fn git_refs(start: usize, prefix: &str) -> Vec<Suggestion> {
-    let Ok(output) = Command::new("git")
-        .args([
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads",
-            "refs/tags",
-        ])
-        .output()
-    else {
+    let Ok(repo) = gix::discover(".") else {
         return Vec::new();
     };
-    if !output.status.success() {
+    let Ok(platform) = repo.references() else {
         return Vec::new();
+    };
+    let mut refs = Vec::new();
+    if let Ok(iter) = platform.local_branches() {
+        refs.extend(iter.filter_map(|reference| {
+            reference
+                .ok()
+                .map(|reference| reference.name().shorten().to_string())
+        }));
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
+    if let Ok(iter) = platform.tags() {
+        refs.extend(iter.filter_map(|reference| {
+            reference
+                .ok()
+                .map(|reference| reference.name().shorten().to_string())
+        }));
+    }
+    refs.into_iter()
         .filter(|name| name.starts_with(prefix))
         .take(200)
         .map(|value| Suggestion {
             span: Span::new(start, start + prefix.len()),
-            value: value.to_string(),
+            value,
             description: Some("git ref".to_string()),
             append_whitespace: true,
             ..Suggestion::default()
@@ -610,5 +677,21 @@ mod tests {
         }];
         assert!(!should_use_shell_bridge(&native, false, "Cargo"));
         assert!(should_use_shell_bridge(&native, true, "ca"));
+    }
+
+    #[test]
+    fn command_cache_collects_only_executable_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("plush-exe");
+        let data = dir.path().join("plush-data");
+        fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&data, "nope").unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let commands = collect_path_commands(&dir.path().to_string_lossy());
+
+        assert!(commands.contains(&"plush-exe".to_string()));
+        assert!(!commands.contains(&"plush-data".to_string()));
     }
 }

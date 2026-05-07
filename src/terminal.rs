@@ -25,6 +25,7 @@ pub fn repair_terminal() {
     let mut out = io::stdout();
     let _ = write!(
         out,
+        // Reset mouse/focus/bracketed-paste modes and force the cursor visible.
         "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l\x1b[?25h"
     );
     let _ = out.flush();

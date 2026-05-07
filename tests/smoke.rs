@@ -133,6 +133,23 @@ fn expands_chained_aliases_with_loop_guard() {
 }
 
 #[test]
+fn expands_aliases_after_command_connectors() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out");
+    let mut config = Config::default();
+    config
+        .aliases
+        .insert("m".to_string(), "echo meow".to_string());
+    let mut shell = Shell::new(config);
+
+    shell
+        .run_line(&format!("true && m > {}", file.display()))
+        .expect("alias command should run after connector");
+
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "meow\n");
+}
+
+#[test]
 fn hash_r_clears_negative_path_cache() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out");
@@ -180,6 +197,60 @@ fn path_assignment_affects_command_lookup() {
         .unwrap();
 
     assert_eq!(std::fs::read_to_string(out).unwrap(), "meow");
+}
+
+#[test]
+fn shell_introspection_builtins_report_commands() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "type cd && command -v cd && which sh"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("cd is a shell builtin"))
+        .stdout(predicates::str::contains("\ncd\n"))
+        .stdout(predicates::str::contains("/sh"));
+}
+
+#[test]
+fn command_builtin_executes_external_command() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "command echo meow"])
+        .assert()
+        .success()
+        .stdout("meow\n");
+}
+
+#[test]
+fn pushd_popd_and_dirs_track_directory_stack() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let command = format!(
+        "cd {} && pushd {} && pwd && popd && pwd",
+        first.path().display(),
+        second.path().display()
+    );
+
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(second.path().to_string_lossy()))
+        .stdout(predicates::str::contains(first.path().to_string_lossy()));
+}
+
+#[test]
+fn startup_profile_reports_checkpoints_when_enabled() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .env("PLUSH_PROFILE_STARTUP", "1")
+        .args(["-c", "true"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("plush startup:"))
+        .stderr(predicates::str::contains("config loaded"))
+        .stderr(predicates::str::contains("shell initialized"));
 }
 
 #[test]
