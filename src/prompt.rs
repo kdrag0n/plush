@@ -119,7 +119,6 @@ impl Default for PurePrompt {
 impl Prompt for PurePrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
         let mut left = String::new();
-        left.push('\n');
         if self.state.ssh {
             if let Some(user_host) = &self.state.user_host {
                 left.push_str(&Style::new().fg(PURE_MUTED).paint(user_host).to_string());
@@ -326,7 +325,6 @@ mod tests {
         prompt.state.duration = Some(Duration::from_secs(6));
 
         let left = prompt.render_prompt_left();
-        assert!(left.starts_with('\n'));
         assert!(left.ends_with('\n'));
         assert!(left.contains("\x1b[38;5;242mmain\x1b[0m"));
         assert!(left.contains("\x1b[38;5;218m*\x1b[0m"));

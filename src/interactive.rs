@@ -11,6 +11,7 @@ use reedline::{
     ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use std::fs;
+use std::io::Write;
 
 pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
     crate::terminal::setup_interactive_job_control();
@@ -78,6 +79,8 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
 
     loop {
         prompt.refresh(last_outcome.as_ref());
+        println!();
+        let _ = std::io::stdout().flush();
         match editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 if line.trim().is_empty() {
