@@ -77,11 +77,36 @@ pub fn validate_with_brush(input: &str) -> Result<()> {
     parser
         .parse_program()
         .map(|_| ())
-        .map_err(|err| PlushError::Syntax(pretty_parse_error(&err.to_string())))
+        .map_err(|err| PlushError::Syntax(pretty_parse_error(input, &err.to_string())))
 }
 
-fn pretty_parse_error(raw: &str) -> String {
-    raw.replace("Parsing error", "invalid command")
+fn pretty_parse_error(input: &str, raw: &str) -> String {
+    let mut message = raw.replace("Parsing error", "invalid command");
+    if let Some((line, col)) = parse_line_col(raw) {
+        let source_line = input.lines().nth(line.saturating_sub(1)).unwrap_or(input);
+        message.push('\n');
+        message.push_str(source_line);
+        message.push('\n');
+        message.push_str(&" ".repeat(col.saturating_sub(1)));
+        message.push('^');
+    }
+    message
+}
+
+fn parse_line_col(raw: &str) -> Option<(usize, usize)> {
+    let marker = "line ";
+    let line_start = raw.find(marker)? + marker.len();
+    let line_end = raw[line_start..].find(' ')? + line_start;
+    let line = raw[line_start..line_end].parse().ok()?;
+    let col_marker = "col ";
+    let col_start = raw.find(col_marker)? + col_marker.len();
+    let col = raw[col_start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((line, col))
 }
 
 fn parse_for_exec(input: &str) -> Result<Script> {
@@ -480,5 +505,8 @@ mod tests {
     fn validates_bash_syntax_with_brush() {
         assert!(validate_with_brush("if true; then echo ok; fi").is_ok());
         assert!(validate_with_brush("echo )").is_err());
+        let err = validate_with_brush("echo )").unwrap_err().to_string();
+        assert!(err.contains("echo )"));
+        assert!(err.contains("^"));
     }
 }

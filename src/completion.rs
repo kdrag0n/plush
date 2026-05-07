@@ -220,4 +220,17 @@ mod tests {
         assert!(is_command_position("echo hi | "));
         assert!(!is_command_position("echo "));
     }
+
+    #[test]
+    fn completes_alias_at_command_position() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("gsh".to_string(), "git show".to_string());
+        let mut completer = PlushCompleter::new(aliases);
+        let values = completer
+            .complete("gs", 2)
+            .into_iter()
+            .map(|s| s.value)
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"gsh".to_string()));
+    }
 }

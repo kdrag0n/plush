@@ -147,3 +147,26 @@ fn likely_incomplete(line: &str) -> bool {
     }
     single || double || parens > 0 || braces > 0 || line.trim_end().ends_with('|')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reedline::Highlighter;
+
+    #[test]
+    fn highlights_large_paste_without_tree_sitter_work() {
+        let highlighter = BashHighlighter::new(16);
+        let styled = highlighter.highlight(&"x".repeat(1024 * 1024), 0);
+        assert_eq!(styled.raw_string().len(), 1024 * 1024);
+        assert_eq!(styled.buffer.len(), 1);
+    }
+
+    #[test]
+    fn validator_marks_obvious_incomplete_input() {
+        let validator = BashValidator::new(1024);
+        assert!(matches!(
+            validator.validate("echo 'unterminated"),
+            ValidationResult::Incomplete
+        ));
+    }
+}
