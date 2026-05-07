@@ -75,6 +75,7 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
                     last_outcome = None;
                     continue;
                 }
+                let _ = crossterm::terminal::disable_raw_mode();
                 match shell.run_line(&line) {
                     Ok(outcome) => last_outcome = Some(outcome),
                     Err(err) => {
