@@ -1,0 +1,26 @@
+#!/usr/bin/env expect
+set timeout 12
+
+set binary [lindex $argv 0]
+if {$binary eq ""} {
+    set binary "target/release/plush"
+}
+
+spawn $binary
+
+# Reedline asks the terminal for cursor position on every prompt. Answer it so
+# this smoke test can run in expect instead of a full terminal emulator.
+expect_before -re "\033\\\[6n" {
+    send "\033\[1;1R"
+    exp_continue
+}
+
+expect "❯ "
+send "sleep 0.1 &\r"
+expect "started"
+expect "❯ "
+send "jobs\r"
+expect -re "(running|done) sleep 0.1"
+expect "❯ "
+send "exit\r"
+expect eof
