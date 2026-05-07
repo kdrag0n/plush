@@ -1,0 +1,305 @@
+use crate::error::{PlushError, Result};
+use crate::expand::{expand_assignment, expand_word, expand_words};
+use crate::parser::{Command, Connector, Pipeline, Redirect, Script};
+use crate::shell::Shell;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Child, ChildStdout, Command as ProcessCommand, Stdio};
+
+#[derive(Debug)]
+pub struct Job {
+    pub id: usize,
+    pub command: String,
+    pub children: Vec<Child>,
+    pub done: bool,
+    pub last_status: i32,
+}
+
+pub fn run_script(shell: &mut Shell, script: &Script) -> Result<i32> {
+    let mut last = 0;
+    for item in &script.items {
+        match item.connector {
+            Connector::Always => {}
+            Connector::And if last != 0 => continue,
+            Connector::Or if last == 0 => continue,
+            Connector::And | Connector::Or => {}
+        }
+        last = run_pipeline(shell, &item.pipeline)?;
+        shell.env.set_last_status(last);
+    }
+    Ok(last)
+}
+
+fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
+    if pipeline.commands.len() == 1 && !pipeline.background {
+        if let Some(status) = try_builtin(shell, &pipeline.commands[0])? {
+            return Ok(status);
+        }
+    }
+
+    let mut previous_stdout: Option<ChildStdout> = None;
+    let mut children = Vec::new();
+    let command_text = pipeline
+        .commands
+        .iter()
+        .map(|cmd| cmd.words.join(" "))
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    for (idx, cmd) in pipeline.commands.iter().enumerate() {
+        let argv = expand_words(&cmd.words, &shell.env)?;
+        if argv.is_empty() {
+            continue;
+        }
+        let mut process = ProcessCommand::new(&argv[0]);
+        process.args(&argv[1..]);
+        process.env_clear();
+        for (k, v) in shell.env.iter() {
+            process.env(k, v);
+        }
+        for (name, value) in &cmd.assignments {
+            process.env(name, expand_assignment(value, &shell.env)?);
+        }
+
+        if let Some(stdout) = previous_stdout.take() {
+            process.stdin(Stdio::from(stdout));
+        }
+        if idx < pipeline.commands.len() - 1 {
+            process.stdout(Stdio::piped());
+        }
+        apply_redirects(&mut process, cmd, shell)?;
+
+        let mut child = process.spawn().map_err(|err| {
+            PlushError::msg(format!(
+                "{}: {err}",
+                argv.first().map_or("", String::as_str)
+            ))
+        })?;
+        previous_stdout = child.stdout.take();
+        children.push(child);
+    }
+
+    if pipeline.background {
+        let id = shell.jobs.len() + 1;
+        println!("[{id}] started {command_text}");
+        shell.jobs.push(Job {
+            id,
+            command: command_text,
+            children,
+            done: false,
+            last_status: 0,
+        });
+        return Ok(0);
+    }
+
+    let mut status = 0;
+    for mut child in children {
+        let exit = child.wait()?;
+        status = exit_code(exit);
+    }
+    crate::terminal::repair_terminal();
+    Ok(status)
+}
+
+fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
+    let argv = expand_words(&cmd.words, &shell.env)?;
+    let Some(name) = argv.first().map(String::as_str) else {
+        for (name, value) in &cmd.assignments {
+            let value = expand_assignment(value, &shell.env)?;
+            shell.env.set(name, value);
+        }
+        return Ok(Some(0));
+    };
+
+    let status = match name {
+        ":" | "true" => 0,
+        "false" => 1,
+        "cd" => shell.cd(argv.get(1).map(String::as_str))?,
+        "pwd" => {
+            println!("{}", std::env::current_dir()?.display());
+            0
+        }
+        "exit" => {
+            let code = argv.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            std::process::exit(code);
+        }
+        "export" => {
+            for arg in &argv[1..] {
+                if let Some((key, value)) = arg.split_once('=') {
+                    shell.env.set(key, value);
+                } else if shell.env.get(arg).is_none() {
+                    shell.env.set(arg, "");
+                }
+            }
+            0
+        }
+        "unset" => {
+            for arg in &argv[1..] {
+                shell.env.unset(arg);
+            }
+            0
+        }
+        "alias" => {
+            if argv.len() == 1 {
+                for (k, v) in &shell.aliases {
+                    println!("alias {k}='{v}'");
+                }
+            } else {
+                for arg in &argv[1..] {
+                    if let Some((k, v)) = arg.split_once('=') {
+                        shell.aliases.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+            0
+        }
+        "source" | "." => {
+            let Some(path) = argv.get(1) else {
+                return Err(PlushError::msg("source: missing file"));
+            };
+            let text = std::fs::read_to_string(path)?;
+            shell.run_source_text(&text)?
+        }
+        "history" => {
+            eprintln!("history: available in interactive mode");
+            0
+        }
+        "jobs" => {
+            shell.reap_background_jobs();
+            for job in &shell.jobs {
+                let state = if job.done { "done" } else { "running" };
+                println!("[{}] {} {}", job.id, state, job.command);
+            }
+            0
+        }
+        "fg" | "bg" | "disown" => {
+            eprintln!("{name}: job-control builtin is scaffolded but not fully wired yet");
+            1
+        }
+        "mkc" => {
+            let Some(path) = argv.get(1) else {
+                return Err(PlushError::msg("mkc: missing directory"));
+            };
+            std::fs::create_dir_all(path)?;
+            shell.cd(Some(path))?
+        }
+        "wttr" => {
+            let loc = argv.get(1).map(String::as_str).unwrap_or("Stanford");
+            let output = ProcessCommand::new("curl")
+                .args(["-s", "-H"])
+                .arg(format!(
+                    "Accept-Language: {}",
+                    shell
+                        .env
+                        .get("LANG")
+                        .unwrap_or("en_US")
+                        .split('_')
+                        .next()
+                        .unwrap_or("en")
+                ))
+                .arg(format!("https://wttr.in/{loc}"))
+                .output()?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines().skip(2).take(5) {
+                println!("{line}");
+            }
+            0
+        }
+        "notify" => {
+            print!(
+                "\x1b]99;i=1:d=0;{}\x1b\\",
+                argv.get(1).map_or("", String::as_str)
+            );
+            print!(
+                "\x1b]99;i=1:d=1:p=body;{}\x1b\\",
+                argv.get(2).map_or("", String::as_str)
+            );
+            0
+        }
+        "kp" => fzf_kill(false, false, argv.get(1).map(String::as_str))?,
+        "skp" => fzf_kill(true, false, argv.get(1).map(String::as_str))?,
+        "ks" => fzf_kill(false, true, argv.get(1).map(String::as_str))?,
+        "sks" => fzf_kill(true, true, argv.get(1).map(String::as_str))?,
+        _ => return Ok(None),
+    };
+    Ok(Some(status))
+}
+
+fn apply_redirects(process: &mut ProcessCommand, cmd: &Command, shell: &Shell) -> Result<()> {
+    for redirect in &cmd.redirects {
+        match redirect {
+            Redirect::Read { fd: 0, target } => {
+                process.stdin(Stdio::from(File::open(expand_word(target, &shell.env)?)?));
+            }
+            Redirect::Write {
+                fd: 1,
+                target,
+                append,
+            } => {
+                process.stdout(Stdio::from(open_write(
+                    expand_word(target, &shell.env)?,
+                    *append,
+                )?));
+            }
+            Redirect::Write {
+                fd: 2,
+                target,
+                append,
+            } => {
+                process.stderr(Stdio::from(open_write(
+                    expand_word(target, &shell.env)?,
+                    *append,
+                )?));
+            }
+            Redirect::Duplicate { fd: 2, target: 1 } => {
+                process.stderr(Stdio::inherit());
+            }
+            Redirect::Close { .. } => {}
+            other => {
+                return Err(PlushError::Unsupported(format!("redirection {other:?}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn open_write(path: String, append: bool) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(!append)
+        .append(append)
+        .open(path)
+}
+
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    status
+        .code()
+        .unwrap_or_else(|| status.signal().map(|signal| 128 + signal).unwrap_or(1))
+}
+
+fn fzf_kill(sudo: bool, sockets: bool, signal: Option<&str>) -> Result<i32> {
+    let sig = signal.unwrap_or("9");
+    let source = if sockets {
+        if sudo {
+            "sudo lsof -Pwni | sed 1d | grep -e LISTEN -e '\\*:'"
+        } else {
+            "lsof -Pwni | sed 1d | grep -e LISTEN -e '\\*:'"
+        }
+    } else if sudo {
+        "sudo ps -ef | sed 1d"
+    } else {
+        "ps -ef | sed 1d"
+    };
+    let awk = if sockets { "{print $2}" } else { "{print $2}" };
+    let cmd = format!(
+        "{source} | fzf -m --header='[kill:{}]' | awk '{}' | xargs -r {}kill -{}",
+        if sockets { "tcp" } else { "process" },
+        awk,
+        if sudo { "sudo " } else { "" },
+        sig
+    );
+    let status = ProcessCommand::new("/bin/sh").arg("-c").arg(cmd).status()?;
+    Ok(exit_code(status))
+}
