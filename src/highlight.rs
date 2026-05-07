@@ -31,6 +31,10 @@ impl Default for BashHighlighter {
 
 impl Highlighter for BashHighlighter {
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
+        if let Some(styled) = highlight_bracketed_paste(line) {
+            return styled;
+        }
+
         if line.len() > self.max_bytes {
             let mut text = StyledText::new();
             text.push((paste_style(), line.to_string()));
@@ -123,6 +127,25 @@ fn paste_style() -> Style {
     }
 }
 
+fn highlight_bracketed_paste(line: &str) -> Option<StyledText> {
+    const START: &str = "\x1b[200~";
+    const END: &str = "\x1b[201~";
+    let start = line.find(START)?;
+    let content_start = start + START.len();
+    let end = line[content_start..].find(END)? + content_start;
+
+    let mut text = StyledText::new();
+    if start > 0 {
+        text.push((Style::new(), line[..start].to_string()));
+    }
+    text.push((paste_style(), line[content_start..end].to_string()));
+    let tail_start = end + END.len();
+    if tail_start < line.len() {
+        text.push((Style::new(), line[tail_start..].to_string()));
+    }
+    Some(text)
+}
+
 fn likely_incomplete(line: &str) -> bool {
     let mut single = false;
     let mut double = false;
@@ -159,6 +182,14 @@ mod tests {
         let styled = highlighter.highlight(&"x".repeat(1024 * 1024), 0);
         assert_eq!(styled.raw_string().len(), 1024 * 1024);
         assert_eq!(styled.buffer.len(), 1);
+    }
+
+    #[test]
+    fn highlights_bracketed_paste_region() {
+        let highlighter = BashHighlighter::new(1024);
+        let styled = highlighter.highlight("echo \x1b[200~hello pasted\x1b[201~", 0);
+        assert_eq!(styled.raw_string(), "echo hello pasted");
+        assert_eq!(styled.buffer.len(), 2);
     }
 
     #[test]
