@@ -2,9 +2,15 @@ use crate::error::{PlushError, Result};
 use crate::expand::{expand_assignment, expand_word, expand_words};
 use crate::parser::{Command, Connector, Pipeline, Redirect, Script};
 use crate::shell::Shell;
+use nix::sys::signal::{self, SigHandler, Signal};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::unistd::Pid;
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, IsTerminal};
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
+use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command as ProcessCommand, Stdio};
 
 #[derive(Debug)]
@@ -13,6 +19,7 @@ pub struct Job {
     pub command: String,
     pub children: Vec<Child>,
     pub done: bool,
+    pub stopped: bool,
     pub last_status: i32,
 }
 
@@ -40,6 +47,7 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
 
     let mut previous_stdout: Option<ChildStdout> = None;
     let mut children = Vec::new();
+    let mut pgid: Option<Pid> = None;
     let command_text = pipeline
         .commands
         .iter()
@@ -52,7 +60,8 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
         if argv.is_empty() {
             continue;
         }
-        let mut process = ProcessCommand::new(&argv[0]);
+        let program = resolve_program(&argv[0], shell);
+        let mut process = ProcessCommand::new(&program);
         process.args(&argv[1..]);
         process.env_clear();
         for (k, v) in shell.env.iter() {
@@ -69,6 +78,7 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
             process.stdout(Stdio::piped());
         }
         apply_redirects(&mut process, cmd, shell)?;
+        configure_child_process_group(&mut process, pgid);
 
         let mut child = process.spawn().map_err(|err| {
             PlushError::msg(format!(
@@ -76,6 +86,12 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
                 argv.first().map_or("", String::as_str)
             ))
         })?;
+        let child_pid = Pid::from_raw(child.id() as i32);
+        if pgid.is_none() {
+            pgid = Some(child_pid);
+        }
+        let group = pgid.unwrap_or(child_pid);
+        let _ = nix::unistd::setpgid(child_pid, group);
         previous_stdout = child.stdout.take();
         children.push(child);
     }
@@ -88,16 +104,13 @@ fn run_pipeline(shell: &mut Shell, pipeline: &Pipeline) -> Result<i32> {
             command: command_text,
             children,
             done: false,
+            stopped: false,
             last_status: 0,
         });
         return Ok(0);
     }
 
-    let mut status = 0;
-    for mut child in children {
-        let exit = child.wait()?;
-        status = exit_code(exit);
-    }
+    let status = wait_foreground_job(pgid, &command_text, children, shell)?;
     crate::terminal::repair_terminal();
     Ok(status)
 }
@@ -173,10 +186,9 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
             }
             0
         }
-        "fg" | "bg" | "disown" => {
-            eprintln!("{name}: job-control builtin is scaffolded but not fully wired yet");
-            1
-        }
+        "fg" => fg_job(shell, argv.get(1).map(String::as_str))?,
+        "bg" => bg_job(shell, argv.get(1).map(String::as_str))?,
+        "disown" => disown_job(shell, argv.get(1).map(String::as_str))?,
         "mkc" => {
             let Some(path) = argv.get(1) else {
                 return Err(PlushError::msg("mkc: missing directory"));
@@ -277,6 +289,178 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     status
         .code()
         .unwrap_or_else(|| status.signal().map(|signal| 128 + signal).unwrap_or(1))
+}
+
+fn resolve_program(name: &str, shell: &Shell) -> PathBuf {
+    if name.contains('/') {
+        return PathBuf::from(name);
+    }
+    if let Some(path) = shell.env.get("PATH") {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Ok(found) = which::which_in(name, Some(path), cwd) {
+            return found;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn fg_job(shell: &mut Shell, spec: Option<&str>) -> Result<i32> {
+    let idx = find_job(shell, spec).ok_or_else(|| PlushError::msg("fg: no such job"))?;
+    let mut job = shell.jobs.remove(idx);
+    let Some(pgid) = job_group(&job) else {
+        return Ok(job.last_status);
+    };
+    let _ = signal::kill(Pid::from_raw(-pgid.as_raw()), Signal::SIGCONT);
+    job.stopped = false;
+    println!("{}", job.command);
+    wait_foreground_job(Some(pgid), &job.command.clone(), job.children, shell)
+}
+
+fn bg_job(shell: &mut Shell, spec: Option<&str>) -> Result<i32> {
+    let idx = find_job(shell, spec).ok_or_else(|| PlushError::msg("bg: no such job"))?;
+    let job = &mut shell.jobs[idx];
+    let Some(pgid) = job_group(job) else {
+        return Ok(job.last_status);
+    };
+    signal::kill(Pid::from_raw(-pgid.as_raw()), Signal::SIGCONT)?;
+    job.stopped = false;
+    println!("[{}] running {}", job.id, job.command);
+    Ok(0)
+}
+
+fn disown_job(shell: &mut Shell, spec: Option<&str>) -> Result<i32> {
+    let idx = find_job(shell, spec).ok_or_else(|| PlushError::msg("disown: no such job"))?;
+    shell.jobs.remove(idx);
+    Ok(0)
+}
+
+fn find_job(shell: &Shell, spec: Option<&str>) -> Option<usize> {
+    let id = spec
+        .map(|s| s.trim_start_matches('%').parse::<usize>().ok())
+        .unwrap_or(None);
+    if let Some(id) = id {
+        shell.jobs.iter().position(|job| job.id == id)
+    } else {
+        shell.jobs.iter().rposition(|job| !job.done)
+    }
+}
+
+fn job_group(job: &Job) -> Option<Pid> {
+    job.children
+        .first()
+        .map(|child| Pid::from_raw(child.id() as i32))
+}
+
+fn configure_child_process_group(process: &mut ProcessCommand, pgid: Option<Pid>) {
+    unsafe {
+        process.pre_exec(move || {
+            let pid = libc::getpid();
+            let group = pgid.map_or(pid, |pgid| pgid.as_raw());
+            if libc::setpgid(0, group) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            signal::signal(Signal::SIGINT, SigHandler::SigDfl).map_err(io::Error::other)?;
+            signal::signal(Signal::SIGQUIT, SigHandler::SigDfl).map_err(io::Error::other)?;
+            signal::signal(Signal::SIGTSTP, SigHandler::SigDfl).map_err(io::Error::other)?;
+            signal::signal(Signal::SIGTTIN, SigHandler::SigDfl).map_err(io::Error::other)?;
+            signal::signal(Signal::SIGTTOU, SigHandler::SigDfl).map_err(io::Error::other)?;
+            Ok(())
+        });
+    }
+}
+
+fn wait_foreground_job(
+    pgid: Option<Pid>,
+    command_text: &str,
+    children: Vec<Child>,
+    shell: &mut Shell,
+) -> Result<i32> {
+    let terminal = io::stdin();
+    let terminal_fd = terminal.as_raw_fd();
+    let terminal_job_control = terminal.is_terminal() && pgid.is_some();
+    let shell_pgid = Pid::from_raw(unsafe { libc::getpgrp() });
+
+    if terminal_job_control {
+        ignore_tty_stop_signals()?;
+        let _ = nix::unistd::tcsetpgrp(&terminal, pgid.unwrap());
+        restore_tty_stop_signals()?;
+    }
+
+    let mut status = 0;
+    let mut stopped = false;
+    let mut live_children = children.len();
+    let child_pids = children
+        .iter()
+        .map(|child| Pid::from_raw(child.id() as i32))
+        .collect::<Vec<_>>();
+
+    while live_children > 0 {
+        let wait_target = pgid
+            .map(|pgid| Pid::from_raw(-pgid.as_raw()))
+            .unwrap_or_else(|| Pid::from_raw(-1));
+        match waitpid(wait_target, Some(WaitPidFlag::WUNTRACED)) {
+            Ok(WaitStatus::Exited(_, code)) => {
+                status = code;
+                live_children -= 1;
+            }
+            Ok(WaitStatus::Signaled(_, signal, _)) => {
+                status = 128 + signal as i32;
+                live_children -= 1;
+            }
+            Ok(WaitStatus::Stopped(_, _)) => {
+                stopped = true;
+                status = 148;
+                break;
+            }
+            Ok(WaitStatus::StillAlive) => {}
+            Ok(_) => {}
+            Err(nix::errno::Errno::ECHILD) => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    if terminal_job_control {
+        ignore_tty_stop_signals()?;
+        let _ = unsafe { libc::tcsetpgrp(terminal_fd, shell_pgid.as_raw()) };
+        restore_tty_stop_signals()?;
+    }
+
+    if stopped {
+        let id = shell.jobs.len() + 1;
+        println!("[{id}] stopped {command_text}");
+        shell.jobs.push(Job {
+            id,
+            command: command_text.to_string(),
+            children,
+            done: false,
+            stopped: true,
+            last_status: status,
+        });
+    } else {
+        for pid in child_pids {
+            let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+        }
+    }
+
+    Ok(status)
+}
+
+fn ignore_tty_stop_signals() -> Result<()> {
+    unsafe {
+        signal::signal(Signal::SIGTTOU, SigHandler::SigIgn)?;
+        signal::signal(Signal::SIGTTIN, SigHandler::SigIgn)?;
+        signal::signal(Signal::SIGTSTP, SigHandler::SigIgn)?;
+    }
+    Ok(())
+}
+
+fn restore_tty_stop_signals() -> Result<()> {
+    unsafe {
+        signal::signal(Signal::SIGTTOU, SigHandler::SigDfl)?;
+        signal::signal(Signal::SIGTTIN, SigHandler::SigDfl)?;
+        signal::signal(Signal::SIGTSTP, SigHandler::SigDfl)?;
+    }
+    Ok(())
 }
 
 fn fzf_kill(sudo: bool, sockets: bool, signal: Option<&str>) -> Result<i32> {

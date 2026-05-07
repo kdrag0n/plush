@@ -398,6 +398,7 @@ fn read_word(input: &str, start: usize) -> Result<(String, usize)> {
         }
         match c {
             '\'' => {
+                word.push('\'');
                 i += 1;
                 let quote_start = i;
                 while i < bytes.len() && bytes[i] != b'\'' {
@@ -407,6 +408,7 @@ fn read_word(input: &str, start: usize) -> Result<(String, usize)> {
                     return Err(PlushError::Syntax("unterminated single quote".to_string()));
                 }
                 word.push_str(&input[quote_start..i]);
+                word.push('\'');
                 i += 1;
             }
             '"' => {

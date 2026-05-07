@@ -13,6 +13,8 @@ use reedline::{
 use std::fs;
 
 pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
+    crate::terminal::setup_interactive_job_control();
+
     let history_path = config::history_path();
     if let Some(parent) = history_path.parent() {
         fs::create_dir_all(parent)?;

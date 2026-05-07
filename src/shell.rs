@@ -76,7 +76,7 @@ impl Shell {
 
     pub fn reap_background_jobs(&mut self) {
         for job in &mut self.jobs {
-            if job.done {
+            if job.done || job.stopped {
                 continue;
             }
             let mut any_running = false;
@@ -127,7 +127,9 @@ impl Shell {
             let line = line.strip_prefix("export ").unwrap_or(line);
             if let Some((key, value)) = line.split_once('=') {
                 let value = value.trim_matches('"').trim_matches('\'');
-                self.env.set(key.trim(), value);
+                let expanded = crate::expand::expand_word(value, &self.env)
+                    .unwrap_or_else(|_| value.to_string());
+                self.env.set(key.trim(), expanded);
             }
         }
     }

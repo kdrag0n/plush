@@ -75,6 +75,18 @@ pub fn expand_word(word: &str, env: &Env) -> Result<String> {
 
     while i < bytes.len() {
         match bytes[i] as char {
+            '\'' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    return Err(PlushError::Syntax("unterminated single quote".to_string()));
+                }
+                out.push_str(&word[start..i]);
+                i += 1;
+            }
             '"' => {
                 i += 1;
                 while i < bytes.len() && bytes[i] != b'"' {
@@ -244,6 +256,7 @@ mod tests {
         let mut env = Env::new();
         env.set("NAME", "plush");
         assert_eq!(expand_word("\"hi $NAME\"", &env).unwrap(), "hi plush");
+        assert_eq!(expand_word("'%s\\n'", &env).unwrap(), "%s\\n");
     }
 
     #[test]
