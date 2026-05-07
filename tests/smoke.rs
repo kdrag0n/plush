@@ -96,6 +96,42 @@ fn reports_command_not_found_like_a_shell() {
 }
 
 #[test]
+fn default_aliases_include_curated_git_shortcuts() {
+    let config = Config::default();
+    assert_eq!(config.aliases.get("g").unwrap(), "git");
+    assert_eq!(config.aliases.get("gws").unwrap(), "git status --short");
+    assert_eq!(
+        config.aliases.get("gpf").unwrap(),
+        "git push --force-with-lease"
+    );
+    assert_eq!(
+        config.aliases.get("gSI").unwrap(),
+        "git submodule update --init --recursive"
+    );
+    assert!(!config.aliases.contains_key("gFf"));
+}
+
+#[test]
+fn expands_chained_aliases_with_loop_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out");
+    let mut config = Config::default();
+    config
+        .aliases
+        .insert("a".to_string(), "b --flag".to_string());
+    config
+        .aliases
+        .insert("b".to_string(), "echo ok".to_string());
+    let mut shell = Shell::new(config);
+
+    shell
+        .run_line(&format!("a > {}", file.display()))
+        .expect("alias command should run");
+
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "ok --flag\n");
+}
+
+#[test]
 fn exposes_completion_inspection_cli() {
     Command::cargo_bin("plush")
         .unwrap()

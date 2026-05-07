@@ -3,7 +3,7 @@ use crate::error::{PlushError, Result};
 use crate::exec::{self, Job};
 use crate::expand::Env;
 use crate::parser;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -113,22 +113,29 @@ impl Shell {
     }
 
     fn expand_alias(&self, line: &str) -> Result<String> {
-        let trimmed = line.trim_start();
-        let leading = &line[..line.len() - trimmed.len()];
-        let Some((first, rest)) = split_first_word(trimmed) else {
-            return Ok(line.to_string());
-        };
-        let Some(alias) = self.aliases.get(first) else {
-            return Ok(line.to_string());
-        };
-        let mut out = String::new();
-        out.push_str(leading);
-        out.push_str(alias);
-        if !rest.is_empty() {
-            out.push(' ');
-            out.push_str(rest);
+        let mut current = line.to_string();
+        let mut seen = BTreeSet::new();
+        loop {
+            let trimmed = current.trim_start();
+            let leading = &current[..current.len() - trimmed.len()];
+            let Some((first, rest)) = split_first_word(trimmed) else {
+                return Ok(current);
+            };
+            if !seen.insert(first.to_string()) {
+                return Ok(current);
+            }
+            let Some(alias) = self.aliases.get(first) else {
+                return Ok(current);
+            };
+            let mut out = String::new();
+            out.push_str(leading);
+            out.push_str(alias);
+            if !rest.is_empty() {
+                out.push(' ');
+                out.push_str(rest);
+            }
+            current = out;
         }
-        Ok(out)
     }
 
     fn load_env_file(&mut self) {
