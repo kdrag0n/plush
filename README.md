@@ -12,6 +12,9 @@ the execution core synchronous and Unix-native.
 - Tree-sitter Bash highlighting for normal input, with a large-input guard.
 - Bracketed paste enabled; pasted regions are highlighted with adaptive gray
   background when raw paste markers reach the highlighter.
+- Large pasted lines are guarded in highlighting, completion, validation, and
+  execution so accidental megabyte input reports cleanly instead of wedging the
+  editor or tripping OS argument limits.
 - Reedline editor with Emacs bindings, history, autosuggest, and columnar
   completion menu.
 - Native execution for simple commands, assignments, aliases, pipelines,
@@ -26,8 +29,8 @@ the execution core synchronous and Unix-native.
 - Terminal repair escapes after foreground programs exit.
 - Directory frecency database for `z`.
 - Lightweight autoenv-style `.env` and `.plushenv` loading on `cd`.
-- PTY smoke coverage for background jobs, Ctrl-Z stopped jobs, `jobs`, and
-  `bg`.
+- PTY smoke coverage for background jobs, Ctrl-Z stopped jobs, stopped
+  foreground pipelines, `jobs`, and `bg`.
 
 ## Validation
 
@@ -56,6 +59,5 @@ orb bash -lc 'cd /Users/dragon/code/projects/plush && target/orb/release/plush -
   forms currently go through `/bin/bash`.
 - Programmable bash/zsh completion support is on-demand and partial. Native
   completions cover the common interactive cases first.
-- Job control has PTY coverage for the core interactive flow, but edge cases
-  such as stopped multi-process pipelines and terminal mode restoration after
-  unusual full-screen program crashes need more corpus cases.
+- Terminal mode restoration after unusual full-screen program crashes needs a
+  larger corpus than the current repair-escape smoke coverage.

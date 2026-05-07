@@ -4,6 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const MAX_COMPLETION_LINE_BYTES: usize = 128 * 1024;
+const MAX_COMPLETION_PREFIX_BYTES: usize = 512;
+
 pub struct PlushCompleter {
     aliases: BTreeMap<String, String>,
     bridge_enabled: bool,
@@ -29,7 +32,13 @@ impl PlushCompleter {
 impl Completer for PlushCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
         let pos = pos.min(line.len());
+        if line.len() > MAX_COMPLETION_LINE_BYTES {
+            return Vec::new();
+        }
         let (start, prefix) = current_word(line, pos);
+        if prefix.len() > MAX_COMPLETION_PREFIX_BYTES {
+            return Vec::new();
+        }
         if prefix.starts_with('$') {
             return env_suggestions(start, prefix);
         }

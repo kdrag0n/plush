@@ -36,5 +36,18 @@ send "bg\r"
 expect "running sleep 5"
 expect "❯ "
 
+send "sleep 5 | cat\r"
+expect "sleep"
+after 500
+send "\x1a"
+expect "stopped sleep 5 | cat"
+expect "❯ "
+send "jobs\r"
+expect "stopped sleep 5 | cat"
+expect "❯ "
+send "bg\r"
+expect "running sleep 5 | cat"
+expect "❯ "
+
 send "exit\r"
 expect eof

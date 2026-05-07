@@ -42,6 +42,13 @@ impl Shell {
 
     pub fn run_line(&mut self, line: &str) -> Result<RunOutcome> {
         let start = std::time::Instant::now();
+        if line.len() > self.config.max_command_bytes {
+            return Err(PlushError::msg(format!(
+                "input is too large to execute ({} bytes, limit {} bytes)",
+                line.len(),
+                self.config.max_command_bytes
+            )));
+        }
         let expanded_alias = self.expand_alias(line)?;
         let status = match parser::parse(&expanded_alias) {
             Ok(script) => exec::run_script(self, &script)?,

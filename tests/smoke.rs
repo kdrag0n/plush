@@ -1,4 +1,6 @@
 use assert_cmd::prelude::*;
+use plush::{Shell, completion::complete_line, config::Config};
+use std::collections::BTreeMap;
 use std::process::Command;
 
 #[test]
@@ -91,4 +93,17 @@ fn exposes_completion_inspection_cli() {
         .assert()
         .success()
         .stdout(predicates::str::contains("checkout"));
+}
+
+#[test]
+fn survives_accidental_megabyte_line() {
+    let mut shell = Shell::new(Config::default());
+    let err = shell.run_line(&"x".repeat(1024 * 1024)).unwrap_err();
+    assert!(err.to_string().contains("input is too large"));
+}
+
+#[test]
+fn completion_survives_accidental_megabyte_line() {
+    let suggestions = complete_line(BTreeMap::new(), &"x".repeat(1024 * 1024), 1024 * 1024);
+    assert!(suggestions.is_empty());
 }
