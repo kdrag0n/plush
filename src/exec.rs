@@ -186,6 +186,11 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
             }
             0
         }
+        "reload" => {
+            let config = crate::config::load();
+            shell.aliases = config.aliases.clone();
+            0
+        }
         "source" | "." => {
             let Some(path) = argv.get(1) else {
                 return Err(PlushError::msg("source: missing file"));

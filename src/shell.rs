@@ -30,6 +30,7 @@ impl Shell {
             previous_dir: None,
             config,
         };
+        shell.install_zshrc_defaults();
         shell.load_env_file();
         shell.load_local_autoenv();
         shell
@@ -128,6 +129,18 @@ impl Shell {
             return;
         };
         self.load_env_vars_from_file(&home.join(".env"));
+    }
+
+    fn install_zshrc_defaults(&mut self) {
+        self.env.set_default("VEDITOR", "code");
+        self.env.set_default("EDITOR", "code");
+        self.env.set_default("LESS", "-R ");
+        if let Some(home) = dirs::home_dir() {
+            let git_fuzzy = home.join(".cache/zsh-plugins/git-fuzzy/bin");
+            if git_fuzzy.is_dir() {
+                self.env.prepend_path(git_fuzzy);
+            }
+        }
     }
 
     fn load_local_autoenv(&mut self) {

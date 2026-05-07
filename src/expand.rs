@@ -1,6 +1,7 @@
 use crate::error::{PlushError, Result};
 use glob::glob;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -25,6 +26,25 @@ impl Env {
 
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.vars.insert(key.into(), value.into());
+    }
+
+    pub fn set_default(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.vars.entry(key.into()).or_insert_with(|| value.into());
+    }
+
+    pub fn prepend_path(&mut self, path: PathBuf) {
+        let mut entries = vec![path];
+        if let Some(current) = self.get("PATH") {
+            entries.extend(std::env::split_paths(current));
+        }
+        if let Ok(joined) = std::env::join_paths(entries) {
+            self.set_os_string("PATH", joined);
+        }
+    }
+
+    fn set_os_string(&mut self, key: impl Into<String>, value: OsString) {
+        self.vars
+            .insert(key.into(), value.to_string_lossy().into_owned());
     }
 
     pub fn unset(&mut self, key: &str) {
