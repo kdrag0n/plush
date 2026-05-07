@@ -31,6 +31,24 @@ pub fn repair_terminal() {
     let _ = out.flush();
 }
 
+pub fn enable_line_editor_mouse() {
+    if !io::stdout().is_terminal() {
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b[?1000h\x1b[?1006h");
+    let _ = out.flush();
+}
+
+pub fn disable_line_editor_mouse() {
+    if !io::stdout().is_terminal() {
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b[?1000l\x1b[?1006l\x1b[?1015l");
+    let _ = out.flush();
+}
+
 pub fn set_prompt_cursor() {
     if !io::stdout().is_terminal() {
         return;

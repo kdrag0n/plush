@@ -59,7 +59,7 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
 
     let mut editor = Reedline::create()
         .use_bracketed_paste(true)
-        .with_mouse_click(MouseClickMode::EnabledWithOsc133)
+        .with_mouse_click(MouseClickMode::Enabled)
         .with_history(history)
         .with_hinter(Box::new(
             DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
@@ -83,7 +83,10 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
         println!();
         let _ = std::io::stdout().flush();
         crate::terminal::set_prompt_cursor();
-        match editor.read_line(&prompt) {
+        crate::terminal::enable_line_editor_mouse();
+        let signal = editor.read_line(&prompt);
+        crate::terminal::disable_line_editor_mouse();
+        match signal {
             Ok(Signal::Success(line)) => {
                 if line.trim().is_empty() {
                     last_outcome = None;
