@@ -357,10 +357,11 @@ fn path_assignment_affects_command_lookup() {
 fn shell_introspection_builtins_report_commands() {
     Command::cargo_bin("plush")
         .unwrap()
-        .args(["-c", "type cd && command -v cd && which sh"])
+        .args(["-c", "type cd && type exec && command -v cd && which sh"])
         .assert()
         .success()
         .stdout(predicates::str::contains("cd is a shell builtin"))
+        .stdout(predicates::str::contains("exec is a shell builtin"))
         .stdout(predicates::str::contains("\ncd\n"))
         .stdout(predicates::str::contains("/sh"));
 }
@@ -373,6 +374,47 @@ fn command_builtin_executes_external_command() {
         .assert()
         .success()
         .stdout("meow\n");
+}
+
+#[test]
+fn exec_builtin_replaces_process() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "exec sh -c 'printf meow'"])
+        .assert()
+        .success()
+        .stdout("meow");
+}
+
+#[test]
+fn exec_without_command_keeps_redirections() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out");
+    let command = format!("exec > {} ; echo meow", file.display());
+
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", &command])
+        .assert()
+        .success()
+        .stdout("");
+
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "meow\n");
+}
+
+#[test]
+fn z_without_query_lists_recorded_dirs() {
+    let state = tempfile::NamedTempFile::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let command = format!("cd {} && z", dir.path().display());
+
+    Command::cargo_bin("plush")
+        .unwrap()
+        .env("PLUSH_Z_DATA", state.path())
+        .args(["-c", &command])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(dir.path().display().to_string()));
 }
 
 #[test]

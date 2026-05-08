@@ -59,7 +59,7 @@ pub fn run_bash_compat(shell: &mut Shell, line: &str) -> Result<i32> {
 
 const BUILTIN_NAMES: &[&str] = &[
     ":", "true", "false", "cd", "z", "pwd", "exit", "export", "unset", "alias", "reload", "source",
-    ".", "history", "hash", "jobs", "fg", "bg", "disown", "pushd", "popd", "dirs", "type",
+    ".", "exec", "history", "hash", "jobs", "fg", "bg", "disown", "pushd", "popd", "dirs", "type",
     "command", "which", "mkc", "su-user", "fp", "wttr", "notify", "kp", "skp", "ks", "sks",
 ];
 
@@ -162,6 +162,10 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
         return Ok(None);
     }
 
+    if name == "exec" {
+        return exec_builtin(shell, cmd, &argv[1..]).map(Some);
+    }
+
     let redirections = redirection_actions(cmd, shell)?;
     let _guard = RedirectionGuard::apply(&redirections)?;
 
@@ -170,11 +174,15 @@ fn try_builtin(shell: &mut Shell, cmd: &Command) -> Result<Option<i32>> {
         "false" => 1,
         "cd" => shell.cd(argv.get(1).map(String::as_str))?,
         "z" => {
-            let Some(query) = argv.get(1) else {
-                return Err(PlushError::msg("z: missing query"));
-            };
-            let target = crate::dirs::find(query)?;
-            shell.cd(Some(&target.to_string_lossy()))?
+            if let Some(query) = argv.get(1) {
+                let target = crate::dirs::find(query)?;
+                shell.cd(Some(&target.to_string_lossy()))?
+            } else {
+                for dir in crate::dirs::list() {
+                    println!("{}", display_path(&dir));
+                }
+                0
+            }
         }
         "pwd" => {
             println!("{}", std::env::current_dir()?.display());
@@ -768,6 +776,95 @@ fn command_builtin(shell: &mut Shell, cmd: &Command, args: &[String]) -> Result<
     run_external_single(shell, cmd, rest)
 }
 
+fn exec_builtin(shell: &mut Shell, cmd: &Command, args: &[String]) -> Result<i32> {
+    let assignments = expand_assignments(cmd, shell)?;
+    let redirections = redirection_actions(cmd, shell)?;
+    let mut clear_env = false;
+    let mut login = false;
+    let mut arg0 = None;
+    let mut idx = 0;
+
+    while let Some(arg) = args.get(idx) {
+        match arg.as_str() {
+            "--" => {
+                idx += 1;
+                break;
+            }
+            "-c" => {
+                clear_env = true;
+                idx += 1;
+            }
+            "-l" => {
+                login = true;
+                idx += 1;
+            }
+            "-a" => {
+                idx += 1;
+                let Some(value) = args.get(idx) else {
+                    return Err(PlushError::msg("exec: -a requires an argument"));
+                };
+                arg0 = Some(value.clone());
+                idx += 1;
+            }
+            _ if arg.starts_with('-') => {
+                return Err(PlushError::msg(format!("exec: bad option: {arg}")));
+            }
+            _ => break,
+        }
+    }
+
+    let rest = &args[idx..];
+    if rest.is_empty() {
+        for (name, value) in assignments {
+            shell.env.set(name, value);
+        }
+        for action in &redirections {
+            apply_redirection_action(action)?;
+        }
+        return Ok(0);
+    }
+
+    let name = &rest[0];
+    let lookup_path = assignments
+        .iter()
+        .rev()
+        .find_map(|(name, value)| (name == "PATH").then_some(value.clone()))
+        .or_else(|| shell.env.get("PATH").map(str::to_string));
+    let Some(program) = shell.resolve_program_with_path(name, lookup_path.as_deref()) else {
+        return Err(PlushError::msg(format!("exec: command not found: {name}")));
+    };
+
+    let mut process = ProcessCommand::new(program);
+    if let Some(arg0) = arg0 {
+        process.arg0(arg0);
+    } else if login {
+        process.arg0(format!("-{}", login_name(name)));
+    }
+    process.args(&rest[1..]);
+    process.env_clear();
+    if !clear_env {
+        for (key, value) in shell.env.iter() {
+            process.env(key, value);
+        }
+    }
+    for (key, value) in assignments {
+        process.env(key, value);
+    }
+
+    let _guard = RedirectionGuard::apply(&redirections)?;
+    restore_child_signals().map_err(PlushError::from)?;
+    let err = process.exec();
+    crate::terminal::setup_interactive_job_control();
+    Err(spawn_error(name, err))
+}
+
+fn login_name(name: &str) -> String {
+    Path::new(name)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string())
+}
+
 fn describe_command(shell: &mut Shell, name: &str, all: bool, verbose: bool) -> bool {
     let mut found = false;
     if let Some(alias) = shell.aliases.get(name) {
@@ -955,14 +1052,21 @@ fn configure_child_process(
             for action in &redirections {
                 apply_redirection_action(action)?;
             }
-            signal::signal(Signal::SIGINT, SigHandler::SigDfl).map_err(io::Error::other)?;
-            signal::signal(Signal::SIGQUIT, SigHandler::SigDfl).map_err(io::Error::other)?;
-            signal::signal(Signal::SIGTSTP, SigHandler::SigDfl).map_err(io::Error::other)?;
-            signal::signal(Signal::SIGTTIN, SigHandler::SigDfl).map_err(io::Error::other)?;
-            signal::signal(Signal::SIGTTOU, SigHandler::SigDfl).map_err(io::Error::other)?;
+            restore_child_signals()?;
             Ok(())
         });
     }
+}
+
+fn restore_child_signals() -> io::Result<()> {
+    unsafe {
+        signal::signal(Signal::SIGINT, SigHandler::SigDfl).map_err(io::Error::other)?;
+        signal::signal(Signal::SIGQUIT, SigHandler::SigDfl).map_err(io::Error::other)?;
+        signal::signal(Signal::SIGTSTP, SigHandler::SigDfl).map_err(io::Error::other)?;
+        signal::signal(Signal::SIGTTIN, SigHandler::SigDfl).map_err(io::Error::other)?;
+        signal::signal(Signal::SIGTTOU, SigHandler::SigDfl).map_err(io::Error::other)?;
+    }
+    Ok(())
 }
 
 fn wait_foreground_job(

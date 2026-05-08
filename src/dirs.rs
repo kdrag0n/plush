@@ -45,6 +45,18 @@ pub fn find(query: &str) -> Result<PathBuf> {
         .ok_or_else(|| PlushError::msg(format!("z: no match for {query}")))
 }
 
+pub fn list() -> Vec<PathBuf> {
+    let mut dirs = load().dirs.into_iter().collect::<Vec<_>>();
+    dirs.sort_by(|(a_path, a), (b_path, b)| {
+        rank(b_path, b)
+            .partial_cmp(&rank(a_path, a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    dirs.into_iter()
+        .map(|(path, _)| PathBuf::from(path))
+        .collect()
+}
+
 fn rank(path: &str, entry: &Entry) -> f64 {
     let age_hours = now().saturating_sub(entry.last) as f64 / 3600.0;
     entry.score / (1.0 + age_hours / 72.0) + path.matches('/').count() as f64 * 0.01
@@ -71,6 +83,9 @@ fn save(db: &Db) -> Result<()> {
 }
 
 fn db_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("PLUSH_Z_DATA") {
+        return PathBuf::from(path);
+    }
     dirs::data_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .join("plush")
