@@ -49,8 +49,11 @@ fn main() {
         Some("--repair-terminal") => {
             terminal::repair_terminal();
         }
+        Some("--version") | Some("-V") => {
+            println!("plush {}", env!("CARGO_PKG_VERSION"));
+        }
         Some("--help") | Some("-h") => {
-            println!("plush - a fast, bash-ish interactive shell");
+            println!("plush - Soft comfy bash-compatible shell");
             println!();
             println!("usage:");
             println!("  plush                 start interactive shell");
@@ -58,6 +61,7 @@ fn main() {
             println!("  plush --validate 'command'");
             println!("  plush --complete 'line' [cursor-byte-pos]");
             println!("  plush --repair-terminal");
+            println!("  plush --version");
         }
         Some(other) => {
             eprintln!("plush: unknown argument: {other}");
