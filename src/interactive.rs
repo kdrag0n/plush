@@ -12,6 +12,11 @@ use reedline::{
 };
 use std::fs;
 use std::io::Write;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
     crate::terminal::setup_interactive_job_control();
@@ -57,8 +62,12 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
             .with_column_width(Some(24)),
     );
 
+    let git_redraw_signal = Arc::new(AtomicBool::new(false));
+
     let mut editor = Reedline::create()
         .use_bracketed_paste(true)
+        .with_break_signal(Arc::clone(&git_redraw_signal))
+        .with_poll_interval(Duration::from_millis(25))
         .with_history(history)
         .with_hinter(Box::new(
             DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
@@ -73,29 +82,33 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
         .with_edit_mode(Box::new(Emacs::new(keybindings)));
 
-    let mut prompt = PurePrompt::new();
+    let mut prompt = PurePrompt::with_git_redraw_signal(Arc::clone(&git_redraw_signal));
     prompt.refresh(None);
-    let mut last_outcome: Option<RunOutcome> = None;
+    let mut pending_outcome: Option<RunOutcome> = None;
+    let mut print_prompt_gap = true;
 
     loop {
-        prompt.refresh(last_outcome.as_ref());
-        println!();
-        let _ = std::io::stdout().flush();
-        crate::terminal::set_prompt_cursor();
+        let outcome = pending_outcome.take();
+        prompt.refresh(outcome.as_ref());
+        if print_prompt_gap {
+            println!();
+            let _ = std::io::stdout().flush();
+            crate::terminal::set_prompt_cursor();
+        }
         match editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
+                print_prompt_gap = true;
                 if line.trim().is_empty() {
-                    last_outcome = None;
                     continue;
                 }
                 let _ = crossterm::terminal::disable_raw_mode();
                 crate::terminal::reset_cursor_shape();
                 match shell.run_line(&line) {
-                    Ok(outcome) => last_outcome = Some(outcome),
+                    Ok(outcome) => pending_outcome = Some(outcome),
                     Err(err) => {
                         eprintln!("plush: {err}");
                         shell.env.set_last_status(2);
-                        last_outcome = Some(RunOutcome {
+                        pending_outcome = Some(RunOutcome {
                             status: 2,
                             duration: std::time::Duration::ZERO,
                         });
@@ -103,9 +116,10 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
                 }
             }
             Ok(Signal::CtrlC) => {
+                print_prompt_gap = true;
                 println!("^C");
                 shell.env.set_last_status(130);
-                last_outcome = Some(RunOutcome {
+                pending_outcome = Some(RunOutcome {
                     status: 130,
                     duration: std::time::Duration::ZERO,
                 });
@@ -114,6 +128,10 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
                 crate::terminal::reset_cursor_shape();
                 println!("exit");
                 return Ok(shell.env.last_status());
+            }
+            Ok(Signal::ExternalBreak(_)) => {
+                print_prompt_gap = false;
+                git_redraw_signal.store(false, Ordering::Relaxed);
             }
             Ok(_) => {}
             Err(err) => {

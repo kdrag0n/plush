@@ -4,10 +4,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::thread;
 
 const MAX_COMPLETION_LINE_BYTES: usize = 128 * 1024;
 const MAX_COMPLETION_PREFIX_BYTES: usize = 512;
+const MAX_BRIDGE_CACHE_ENTRIES: usize = 128;
 
 pub struct PlushCompleter {
     aliases: BTreeMap<String, String>,
@@ -62,12 +64,13 @@ impl Completer for PlushCompleter {
             file_suggestions(start, prefix, false)
         };
         if self.bridge_enabled && should_use_shell_bridge(&suggestions, command_position, prefix) {
-            if !command_position {
-                suggestions.extend(programmable_bash_completion_bridge(
-                    line, pos, start, prefix,
-                ));
-            }
-            suggestions.extend(shell_completion_bridge(start, prefix, command_position));
+            suggestions.extend(async_shell_completion_bridge(
+                line,
+                pos,
+                start,
+                prefix,
+                command_position,
+            ));
         }
         dedup(suggestions)
     }
@@ -219,6 +222,108 @@ fn should_use_shell_bridge(native: &[Suggestion], command_position: bool, prefix
         return false;
     }
     command_position || native.is_empty()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct BridgeKey {
+    cwd: PathBuf,
+    path_env: String,
+    line: String,
+    pos: usize,
+    start: usize,
+    prefix: String,
+    command_position: bool,
+}
+
+#[derive(Default)]
+struct BridgeState {
+    completed: BTreeMap<BridgeKey, Vec<Suggestion>>,
+    pending: BTreeSet<BridgeKey>,
+}
+
+struct BridgeWorker {
+    tx: mpsc::Sender<BridgeKey>,
+    state: Arc<Mutex<BridgeState>>,
+}
+
+fn async_shell_completion_bridge(
+    line: &str,
+    pos: usize,
+    start: usize,
+    prefix: &str,
+    command_position: bool,
+) -> Vec<Suggestion> {
+    if prefix.len() > 128 || line.len() > 4096 {
+        return Vec::new();
+    }
+
+    let key = BridgeKey {
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        path_env: std::env::var("PATH").unwrap_or_default(),
+        line: line.to_string(),
+        pos,
+        start,
+        prefix: prefix.to_string(),
+        command_position,
+    };
+    bridge_worker().cached_or_request(key)
+}
+
+fn bridge_worker() -> &'static BridgeWorker {
+    static WORKER: OnceLock<BridgeWorker> = OnceLock::new();
+    WORKER.get_or_init(BridgeWorker::start)
+}
+
+impl BridgeWorker {
+    fn start() -> Self {
+        let (tx, rx) = mpsc::channel::<BridgeKey>();
+        let state = Arc::new(Mutex::new(BridgeState::default()));
+        let worker_state = Arc::clone(&state);
+        thread::Builder::new()
+            .name("plush-completion-bridge".to_string())
+            .spawn(move || run_bridge_worker(rx, worker_state))
+            .expect("spawn completion bridge worker");
+        Self { tx, state }
+    }
+
+    fn cached_or_request(&self, key: BridgeKey) -> Vec<Suggestion> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => return Vec::new(),
+        };
+        if let Some(suggestions) = state.completed.get(&key) {
+            return suggestions.clone();
+        }
+        if state.pending.insert(key.clone()) && self.tx.send(key.clone()).is_err() {
+            state.pending.remove(&key);
+        }
+        Vec::new()
+    }
+}
+
+fn run_bridge_worker(rx: mpsc::Receiver<BridgeKey>, state: Arc<Mutex<BridgeState>>) {
+    while let Ok(key) = rx.recv() {
+        let suggestions = compute_bridge_suggestions(&key);
+        if let Ok(mut state) = state.lock() {
+            state.pending.remove(&key);
+            state.completed.insert(key.clone(), suggestions);
+            while state.completed.len() > MAX_BRIDGE_CACHE_ENTRIES {
+                let Some(first) = state.completed.keys().next().cloned() else {
+                    break;
+                };
+                state.completed.remove(&first);
+            }
+        }
+    }
+}
+
+fn compute_bridge_suggestions(key: &BridgeKey) -> Vec<Suggestion> {
+    let mut suggestions = Vec::new();
+    if !key.command_position {
+        suggestions.extend(programmable_bash_completion_bridge_sync(key));
+    }
+    suggestions.extend(shell_completion_bridge_sync(key));
+    suggestions
 }
 
 fn file_suggestions(start: usize, prefix: &str, dirs_only: bool) -> Vec<Suggestion> {
@@ -378,13 +483,20 @@ fn git_refs(start: usize, prefix: &str) -> Vec<Suggestion> {
         .collect()
 }
 
-fn shell_completion_bridge(start: usize, prefix: &str, command_position: bool) -> Vec<Suggestion> {
-    if prefix.len() > 128 {
-        return Vec::new();
-    }
-    let action = if command_position { "-A command" } else { "-f" };
-    let script = format!("compgen {action} -- {}", shell_quote(prefix));
-    let Ok(output) = Command::new("bash").arg("-lc").arg(script).output() else {
+fn shell_completion_bridge_sync(key: &BridgeKey) -> Vec<Suggestion> {
+    let action = if key.command_position {
+        "-A command"
+    } else {
+        "-f"
+    };
+    let script = format!("compgen {action} -- {}", shell_quote(&key.prefix));
+    let Ok(output) = Command::new("bash")
+        .arg("-lc")
+        .arg(script)
+        .current_dir(&key.cwd)
+        .env("PATH", &key.path_env)
+        .output()
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -394,26 +506,18 @@ fn shell_completion_bridge(start: usize, prefix: &str, command_position: bool) -
         .lines()
         .take(100)
         .map(|value| Suggestion {
-            span: Span::new(start, start + prefix.len()),
+            span: Span::new(key.start, key.start + key.prefix.len()),
             value: value.to_string(),
             description: Some("bash".to_string()),
-            append_whitespace: command_position,
+            append_whitespace: key.command_position,
             ..Suggestion::default()
         })
         .collect::<Vec<_>>();
-    out.extend(zsh_completion_bridge(start, prefix, command_position));
+    out.extend(zsh_completion_bridge_sync(key));
     out
 }
 
-fn programmable_bash_completion_bridge(
-    line: &str,
-    pos: usize,
-    start: usize,
-    prefix: &str,
-) -> Vec<Suggestion> {
-    if prefix.len() > 128 || line.len() > 4096 {
-        return Vec::new();
-    }
+fn programmable_bash_completion_bridge_sync(key: &BridgeKey) -> Vec<Suggestion> {
     let script = r#"
 source /opt/homebrew/etc/profile.d/bash_completion.sh >/dev/null 2>&1 || \
 source /usr/local/etc/profile.d/bash_completion.sh >/dev/null 2>&1 || \
@@ -444,8 +548,10 @@ printf '%s\n' "${COMPREPLY[@]}"
     let Ok(output) = Command::new("bash")
         .arg("-lc")
         .arg(script)
-        .env("PLUSH_COMP_LINE", line)
-        .env("PLUSH_COMP_POINT", pos.to_string())
+        .current_dir(&key.cwd)
+        .env("PATH", &key.path_env)
+        .env("PLUSH_COMP_LINE", &key.line)
+        .env("PLUSH_COMP_POINT", key.pos.to_string())
         .output()
     else {
         return Vec::new();
@@ -455,10 +561,10 @@ printf '%s\n' "${COMPREPLY[@]}"
     }
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|value| value.starts_with(prefix))
+        .filter(|value| value.starts_with(&key.prefix))
         .take(100)
         .map(|value| Suggestion {
-            span: Span::new(start, start + prefix.len()),
+            span: Span::new(key.start, key.start + key.prefix.len()),
             value: value.to_string(),
             description: Some("bash completion".to_string()),
             append_whitespace: true,
@@ -467,15 +573,21 @@ printf '%s\n' "${COMPREPLY[@]}"
         .collect()
 }
 
-fn zsh_completion_bridge(start: usize, prefix: &str, command_position: bool) -> Vec<Suggestion> {
-    if !command_position || prefix.len() > 128 {
+fn zsh_completion_bridge_sync(key: &BridgeKey) -> Vec<Suggestion> {
+    if !key.command_position {
         return Vec::new();
     }
     let script = format!(
         "print -rl -- ${{(k)commands[(I){}*]}}",
-        zsh_pattern_quote(prefix)
+        zsh_pattern_quote(&key.prefix)
     );
-    let Ok(output) = Command::new("zsh").arg("-fc").arg(script).output() else {
+    let Ok(output) = Command::new("zsh")
+        .arg("-fc")
+        .arg(script)
+        .current_dir(&key.cwd)
+        .env("PATH", &key.path_env)
+        .output()
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -485,7 +597,7 @@ fn zsh_completion_bridge(start: usize, prefix: &str, command_position: bool) -> 
         .lines()
         .take(100)
         .map(|value| Suggestion {
-            span: Span::new(start, start + prefix.len()),
+            span: Span::new(key.start, key.start + key.prefix.len()),
             value: value.to_string(),
             description: Some("zsh".to_string()),
             append_whitespace: true,

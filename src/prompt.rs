@@ -5,6 +5,12 @@ use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchS
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc,
+};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const PURE_GIT_BRANCH: Color = Color::Fixed(242);
@@ -19,7 +25,10 @@ pub struct PromptState {
     git: Option<GitInfo>,
     git_cache_cwd: Option<PathBuf>,
     git_last_refresh: Option<Instant>,
-    git_slow: bool,
+    git_pending_request: Option<u64>,
+    git_pending_cwd: Option<PathBuf>,
+    git_applied_request: u64,
+    git_redraw_signal: Option<Arc<AtomicBool>>,
     venv: Option<String>,
     ssh: bool,
     user_host: Option<String>,
@@ -33,6 +42,31 @@ struct GitInfo {
     behind: bool,
 }
 
+#[derive(Clone)]
+struct GitResult {
+    id: u64,
+    cwd: PathBuf,
+    info: Option<GitInfo>,
+}
+
+struct GitRequest {
+    id: u64,
+    cwd: PathBuf,
+    redraw_signal: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Default)]
+struct GitWorkerState {
+    latest_requested: u64,
+    completed: Option<GitResult>,
+}
+
+struct GitStatusWorker {
+    tx: mpsc::Sender<GitRequest>,
+    state: Arc<Mutex<GitWorkerState>>,
+    next_id: AtomicU64,
+}
+
 impl Default for PromptState {
     fn default() -> Self {
         Self {
@@ -42,7 +76,10 @@ impl Default for PromptState {
             git: None,
             git_cache_cwd: None,
             git_last_refresh: None,
-            git_slow: false,
+            git_pending_request: None,
+            git_pending_cwd: None,
+            git_applied_request: 0,
+            git_redraw_signal: None,
             venv: std::env::var("VIRTUAL_ENV")
                 .ok()
                 .or_else(|| std::env::var("CONDA_DEFAULT_ENV").ok())
@@ -74,23 +111,49 @@ impl PromptState {
     }
 
     fn refresh_git(&mut self, command_finished: bool) {
+        self.apply_git_result();
+
         let cwd_changed = self.git_cache_cwd.as_ref() != Some(&self.cwd);
+        if cwd_changed {
+            self.git = None;
+            self.git_cache_cwd = Some(self.cwd.clone());
+            self.git_last_refresh = None;
+        }
+
         let stale = self
             .git_last_refresh
             .is_none_or(|last| last.elapsed() > Duration::from_secs(10));
-
-        if !cwd_changed && !command_finished && !stale {
+        if !cwd_changed && !command_finished && !stale && self.git_last_refresh.is_some() {
             return;
         }
-        if self.git_slow && !cwd_changed && !command_finished && !stale {
+        if self.git_pending_cwd.as_ref() == Some(&self.cwd) && !command_finished && !stale {
             return;
         }
 
-        let start = Instant::now();
-        self.git = git_info(&self.cwd);
-        self.git_cache_cwd = Some(self.cwd.clone());
+        let request_id = git_worker().request(self.cwd.clone(), self.git_redraw_signal.clone());
+        self.git_pending_request = Some(request_id);
+        self.git_pending_cwd = Some(self.cwd.clone());
         self.git_last_refresh = Some(Instant::now());
-        self.git_slow = start.elapsed() > Duration::from_millis(75);
+    }
+
+    fn apply_git_result(&mut self) {
+        let Some(result) = git_worker().completed_after(self.git_applied_request) else {
+            return;
+        };
+        self.git_applied_request = result.id;
+        if self.git_pending_request == Some(result.id) {
+            self.git_pending_request = None;
+            self.git_pending_cwd = None;
+        }
+        if result.cwd != self.cwd {
+            return;
+        }
+        self.git = result.info;
+        self.git_cache_cwd = Some(result.cwd);
+        self.git_last_refresh = Some(Instant::now());
+        if let Some(signal) = &self.git_redraw_signal {
+            signal.store(false, Ordering::Relaxed);
+        }
     }
 }
 
@@ -103,6 +166,12 @@ impl PurePrompt {
         Self {
             state: PromptState::default(),
         }
+    }
+
+    pub fn with_git_redraw_signal(redraw_signal: Arc<AtomicBool>) -> Self {
+        let mut prompt = Self::new();
+        prompt.state.git_redraw_signal = Some(redraw_signal);
+        prompt
     }
 
     pub fn refresh(&mut self, outcome: Option<&RunOutcome>) {
@@ -261,6 +330,77 @@ fn ahead_behind(repo: &gix::Repository) -> Option<(bool, bool)> {
         .next()
         .is_some();
     Some((ahead, behind))
+}
+
+fn git_worker() -> &'static GitStatusWorker {
+    static WORKER: OnceLock<GitStatusWorker> = OnceLock::new();
+    WORKER.get_or_init(GitStatusWorker::start)
+}
+
+impl GitStatusWorker {
+    fn start() -> Self {
+        let (tx, rx) = mpsc::channel::<GitRequest>();
+        let state = Arc::new(Mutex::new(GitWorkerState::default()));
+        let worker_state = Arc::clone(&state);
+        thread::Builder::new()
+            .name("plush-git-status".to_string())
+            .spawn(move || run_git_worker(rx, worker_state))
+            .expect("spawn git status worker");
+        Self {
+            tx,
+            state,
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    fn request(&self, cwd: PathBuf, redraw_signal: Option<Arc<AtomicBool>>) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut state) = self.state.lock() {
+            state.latest_requested = id;
+        }
+        let _ = self.tx.send(GitRequest {
+            id,
+            cwd,
+            redraw_signal,
+        });
+        id
+    }
+
+    fn completed_after(&self, applied_request: u64) -> Option<GitResult> {
+        let state = self.state.lock().ok()?;
+        let result = state.completed.as_ref()?;
+        (result.id > applied_request).then(|| result.clone())
+    }
+}
+
+fn run_git_worker(rx: mpsc::Receiver<GitRequest>, state: Arc<Mutex<GitWorkerState>>) {
+    while let Ok(mut request) = rx.recv() {
+        while let Ok(newer) = rx.try_recv() {
+            request = newer;
+        }
+
+        let info = git_info(&request.cwd);
+        let current = if let Ok(mut state) = state.lock() {
+            if state.latest_requested == request.id {
+                state.completed = Some(GitResult {
+                    id: request.id,
+                    cwd: request.cwd,
+                    info,
+                });
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if current {
+            if let Some(signal) = request.redraw_signal {
+                signal.store(true, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 fn output_trimmed(command: &mut Command) -> Option<String> {
