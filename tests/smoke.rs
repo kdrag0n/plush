@@ -250,7 +250,20 @@ fn default_aliases_include_curated_git_shortcuts() {
         config.aliases.get("gSI").unwrap(),
         "git submodule update --init --recursive"
     );
+    assert_eq!(
+        config.aliases.get("gl").unwrap(),
+        "git log --pretty=format:'%C(yellow)%h%Creset %Cgreen%cr%Creset %C(auto)%d%Creset %s'"
+    );
     assert!(!config.aliases.contains_key("gFf"));
+}
+
+#[test]
+fn git_log_alias_quotes_pretty_format() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-c", "gl --max-count=0"])
+        .assert()
+        .success();
 }
 
 #[test]

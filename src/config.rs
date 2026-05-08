@@ -200,7 +200,7 @@ fn default_aliases() -> BTreeMap<String, String> {
         ("gix", "git rm -r --cached"),
         (
             "gl",
-            "git log --pretty=format:%C(yellow)%h%Creset %Cgreen%cr%Creset %C(auto)%d%Creset %s",
+            "git log --pretty=format:'%C(yellow)%h%Creset %Cgreen%cr%Creset %C(auto)%d%Creset %s'",
         ),
         ("glS", "git log --show-signature"),
         ("glg", "git log --topo-order --graph --oneline --decorate"),
