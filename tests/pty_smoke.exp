@@ -20,8 +20,12 @@ expect "❯ "
 send "git ch\t"
 expect "checkout"
 send "\x03"
-expect "^C"
-expect "❯ "
+expect {
+    "^C" {
+        exit 1
+    }
+    "❯ " {}
+}
 
 send "sleep 0.1 &\r"
 expect "\033\[0 q"
@@ -70,5 +74,10 @@ send "bg\r"
 expect "running if true; then echo fallback-started; sleep 5; fi"
 expect "❯ "
 
-send "exit\r"
-expect eof
+send "\x04"
+expect {
+    "exit" {
+        exit 1
+    }
+    eof {}
+}

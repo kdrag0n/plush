@@ -117,7 +117,6 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
             }
             Ok(Signal::CtrlC) => {
                 print_prompt_gap = true;
-                println!("^C");
                 shell.env.set_last_status(130);
                 pending_outcome = Some(RunOutcome {
                     status: 130,
@@ -126,7 +125,6 @@ pub fn run_interactive(shell: &mut Shell) -> Result<i32> {
             }
             Ok(Signal::CtrlD) => {
                 crate::terminal::reset_cursor_shape();
-                println!("exit");
                 return Ok(shell.env.last_status());
             }
             Ok(Signal::ExternalBreak(_)) => {
