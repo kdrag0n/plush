@@ -74,8 +74,8 @@ class Plush < Formula
   desc "Soft comfy bash-compatible shell"
   homepage "https://github.com/${PLUSH_REPOSITORY}"
   version "${PLUSH_VERSION}"
-  revision ${HOMEBREW_REVISION}
   license "MIT"
+  revision ${HOMEBREW_REVISION}
 
   if OS.mac? && Hardware::CPU.arm?
     url "${url_base}/plush-macos-aarch64",
