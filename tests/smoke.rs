@@ -15,6 +15,27 @@ fn runs_simple_command() {
 }
 
 #[test]
+fn accepts_login_command_option_cluster() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-lc", "/bin/sh -c 'echo exit-status-ok; exit 7'"])
+        .assert()
+        .code(7)
+        .stdout("exit-status-ok\n")
+        .stderr("");
+}
+
+#[test]
+fn accepts_split_login_command_options() {
+    Command::cargo_bin("plush")
+        .unwrap()
+        .args(["-l", "-c", "echo login-command-ok"])
+        .assert()
+        .success()
+        .stdout("login-command-ok\n");
+}
+
+#[test]
 fn runs_pipeline_and_redirection() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("out");
